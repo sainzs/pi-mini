@@ -46,7 +46,11 @@ class Semaphore {
 	private active = 0;
 	private readonly waiting: Array<() => void> = [];
 
-	constructor(private readonly limit: number) {}
+	private readonly limit: number;
+
+	constructor(limit: number) {
+		this.limit = limit;
+	}
 
 	async acquire(): Promise<() => void> {
 		if (this.active >= this.limit) {
