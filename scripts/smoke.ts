@@ -53,7 +53,16 @@ const ok = await runMiniAgent({
 console.log(`\n${formatEnvelope(ok)}\n`);
 assert.equal(ok.exitReason, "submitted", "a well-scoped run must submit");
 assert.ok(ok.steps > 0 && ok.steps <= 8);
-assert.ok(ok.costUsd > 0, "spend must be observed and charged");
+// Zero-priced deployments (e.g. Foundry DeepSeek: zeroed cost table in
+// models.json) legitimately report $0; the spend invariant only holds where a
+// price exists. Assert conditionally and say so, instead of failing honestly
+// priced-at-zero runs.
+const priced = Object.values(model.cost ?? {}).some((v) => typeof v === "number" && v > 0);
+if (priced) {
+	assert.ok(ok.costUsd > 0, "spend must be observed and charged");
+} else {
+	console.log("  (model has a zeroed cost table: skipping the spend assertion — step/wall limits bind)");
+}
 
 // --- 2. The pre-spend gate stops at the step limit ---------------------------
 console.log("--- run 2: step limit enforcement ---");

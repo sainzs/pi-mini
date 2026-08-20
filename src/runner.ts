@@ -240,15 +240,26 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	});
 	sessionRef = session;
 
-	// Charge spend as it is observed, and keep a full local transcript.
+	// Charge spend as it is observed, and keep a full local transcript. Provider
+	// failures (429 throttling, 5xx) end as assistant messages with an
+	// errorMessage rather than a thrown prompt — capture the last one, or a run
+	// killed by throttling reports only its lease warning as the "error".
+	// Observed 2026-08-20: four consecutive 429s on DeepSeek-V4-Flash-0731
+	// burned steps 4–7 and the envelope never mentioned the rate limit.
+	let lastProviderError: string | undefined;
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type !== "message_end") return;
 		const message = event.message as {
 			role?: string;
+			stopReason?: string;
+			errorMessage?: string;
 			usage?: { cost?: { total?: number } };
 		};
 		if (message.role === "assistant" && message.usage?.cost?.total) {
 			budget.charge(message.usage.cost.total);
+		}
+		if (message.role === "assistant" && message.stopReason === "error" && message.errorMessage) {
+			lastProviderError = message.errorMessage.slice(0, 300);
 		}
 		appendRecord(ledger.transcript, { type: "message", message: event.message });
 	});
@@ -282,6 +293,9 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	let exitReason: ExitReason = submitted
 		? "submitted"
 		: (budget.tripped ?? stopReason ?? "error");
+	if (exitReason === "error" && !error && lastProviderError) {
+		error = lastProviderError;
+	}
 
 	// A dead model binding fails on the FIRST provider call with an auth/config
 	// error. Without this classification it reads as a generic "error" — or
