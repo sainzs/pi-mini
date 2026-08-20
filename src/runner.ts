@@ -25,7 +25,7 @@ import { Budget, type BudgetLimits, type ExitReason, type TreeBudget } from "./b
 import { CheckpointRecorder } from "./checkpoints.ts";
 import type { RunResult } from "./envelope.ts";
 import { createSubmitGate } from "./gate.ts";
-import { createJournalState, createJournalTool, renderJournal } from "./journal.ts";
+import { createJournalState, createJournalTool, JournalSeam, renderJournal } from "./journal.ts";
 import { appendRecord, createLedger } from "./ledger.ts";
 import { captureLeaseBaseline, leaseViolations, observeChanges } from "./lease.ts";
 import { MiniResourceLoader } from "./loader.ts";
@@ -102,6 +102,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	const band: Band = options.band ?? "standard";
 	const tuning = BANDS[band];
 	const journal = createJournalState();
+	const seam = new JournalSeam();
 	const supervisor = new Supervisor({
 		expectsWrite: (options.lease?.length ?? 0) > 0,
 		tuning,
@@ -189,6 +190,8 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			supervisor,
 			checkpoints,
 			lastJournalStep: () => journal.lastJournalStep,
+			journal,
+			seam,
 		}),
 		createSubmitTool(
 			(details) => {

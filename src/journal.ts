@@ -25,6 +25,10 @@
  *    code, not by asking nicely.
  *  - The harness records update cadence (`lastJournalStep`) so the supervisor
  *    can detect a stale ledger and inject a refresh.
+ *  - Settled constraints are re-broadcast *mechanically* on the `sh` tail
+ *    (cadenced digest, and a one-shot full render after the first elision).
+ *    Drift-resistance must not depend on the model cooperating with a nudge.
+ *    Harness-enforced by code, never prompt-requested.
  */
 
 import { writeFileSync } from "node:fs";
@@ -87,7 +91,7 @@ export function renderJournal(state: JournalState): string {
 }
 
 /**
- * A bounded digest for re-injection when the ledger goes stale — J-Space's
+ * A bounded one-liner for re-injection when the ledger goes stale — J-Space's
  * "shared constraint broadcast": settled constraints are re-asserted rather
  * than left to decay in the transcript tail.
  */
@@ -97,7 +101,84 @@ export function journalDigest(state: JournalState): string {
 	if (state.verified.length) lines.push(`verified: ${state.verified.length} item(s), latest: ${state.verified[state.verified.length - 1]}`);
 	if (state.open.length) lines.push(`open: ${state.open.join(" · ")}`);
 	if (state.next) lines.push(`next: ${state.next}`);
-	return lines.join("\n");
+	return lines.join(" · ");
+}
+
+/** True when the journal holds any settled state worth re-broadcasting. */
+export function journalIsPopulated(state: JournalState): boolean {
+	return Boolean(state.goal) || state.core.length > 0 || state.verified.length > 0 || state.open.length > 0 || Boolean(state.next);
+}
+
+/** Cap on the full journal body re-broadcast after the first elision. */
+export const JOURNAL_REBROADCAST_CAP = 1_500;
+
+/** Cadenced digest line that rides the `sh` result tail. */
+export function formatJournalDigestLine(state: JournalState): string {
+	return `[journal] ${journalDigest(state)}`;
+}
+
+/** One-shot full-journal re-broadcast after context decay (first elision). */
+export function formatJournalRebroadcast(state: JournalState): string {
+	const body = renderJournal(state);
+	const capped = body.length > JOURNAL_REBROADCAST_CAP ? body.slice(0, JOURNAL_REBROADCAST_CAP) : body;
+	return `[journal — re-broadcast after elision]\n${capped}`;
+}
+
+export interface JournalSeamInput {
+	state: JournalState;
+	step: number;
+	digestEvery: number;
+	/** Supervisor fired a kind-"journal" nudge on this same result — digest is redundant. */
+	journalNudge: boolean;
+	/** This `sh` observation was elided (the `<elided_chars>` marker). */
+	elidedThisStep: boolean;
+}
+
+/**
+ * J-Space seam recovery for the journal.
+ *
+ * Two mechanical re-broadcasts, both riding the `sh` tail so they cost one
+ * cache-write increment and no extra turn:
+ *
+ *  1. A one-line digest every `digestEvery` steps (band-tuned), skipped when
+ *     the journal is empty or a stale-journal *nudge* already fired this step.
+ *  2. After the first elision of the run, the *next* `sh` result gets the full
+ *     rendered journal once, capped, so settled constraints survive the decay
+ *     event rather than waiting for the model to rewrite them.
+ *
+ * The stale-journal nudge is unchanged: it still asks for a fresh write. The
+ * digest covers decay of state that is already settled.
+ */
+export class JournalSeam {
+	private firstElisionSeen = false;
+	private rebroadcastDue = false;
+	private rebroadcastSent = false;
+
+	tail(input: JournalSeamInput): string | undefined {
+		const rebroadcast = this.takeRebroadcast(input.state);
+		if (input.elidedThisStep && !this.firstElisionSeen) {
+			this.firstElisionSeen = true;
+			this.rebroadcastDue = true;
+		}
+		if (rebroadcast) return rebroadcast;
+		return this.digestLine(input);
+	}
+
+	private takeRebroadcast(state: JournalState): string | undefined {
+		if (!this.rebroadcastDue || this.rebroadcastSent) return undefined;
+		this.rebroadcastDue = false;
+		this.rebroadcastSent = true;
+		if (!journalIsPopulated(state)) return undefined;
+		return formatJournalRebroadcast(state);
+	}
+
+	private digestLine(input: JournalSeamInput): string | undefined {
+		if (input.journalNudge) return undefined;
+		if (!journalIsPopulated(input.state)) return undefined;
+		if (input.digestEvery <= 0) return undefined;
+		if (input.step <= 0 || input.step % input.digestEvery !== 0) return undefined;
+		return formatJournalDigestLine(input.state);
+	}
 }
 
 export interface JournalToolInput {

@@ -19,6 +19,7 @@ import type { Budget } from "./budget.ts";
 import type { CheckpointRecorder } from "./checkpoints.ts";
 import { scrubEnv } from "./envscrub.ts";
 import type { SubmitGate } from "./gate.ts";
+import type { JournalSeam, JournalState } from "./journal.ts";
 import { recordObservation, type RunLedger } from "./ledger.ts";
 import type { Supervisor } from "./supervisor.ts";
 
@@ -50,6 +51,10 @@ export interface ShToolInput {
 	checkpoints?: CheckpointRecorder;
 	/** Step of the last journal write, for staleness nudges. */
 	lastJournalStep?: () => number;
+	/** Externalized run journal — the mechanical digest rides the `sh` tail. */
+	journal?: JournalState;
+	/** Seam recovery: cadenced digest + one-shot full re-broadcast after elision. */
+	seam?: JournalSeam;
 }
 
 /**
@@ -72,7 +77,7 @@ export const SH_COMMAND_PREFIX = [
  * parent's credentials (threat and policy in `envscrub.ts`).
  */
 export function createShTool(input: ShToolInput): ToolDefinition {
-	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, lastJournalStep } = input;
+	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, lastJournalStep, journal, seam } = input;
 	const base = createBashToolDefinition(cwd, {
 		commandPrefix,
 		exposeSessionEnvironment: false,
@@ -116,11 +121,28 @@ export function createShTool(input: ShToolInput): ToolDefinition {
 				if (block.type !== "text") return block;
 				return { ...block, text: recordObservation(ledger, budget.steps, block.text) };
 			});
+			const elidedThisStep = content.some(
+				(block) => block.type === "text" && block.text.includes("<elided_chars>"),
+			);
 
 			// J-Space steering rides the tail of the observation the model is about
 			// to read: one cache-write increment, no extra turn.
 			const nudge = supervisor?.nudge(budget.steps, lastJournalStep?.() ?? -1);
 			if (nudge) content.push({ type: "text" as const, text: `\n${nudge.text}` });
+
+			// Settled constraints re-broadcast themselves — harness-enforced, never
+			// prompt-requested. The stale-journal nudge still asks for a fresh write;
+			// the digest covers decay of state that is already settled.
+			if (journal && seam) {
+				const seamTail = seam.tail({
+					state: journal,
+					step: budget.steps,
+					digestEvery: supervisor?.digestEvery ?? 0,
+					journalNudge: nudge?.kind === "journal",
+					elidedThisStep,
+				});
+				if (seamTail) content.push({ type: "text" as const, text: `\n${seamTail}` });
+			}
 
 			const warning = budget.warningLine();
 			if (warning) content.push({ type: "text" as const, text: `\n${warning}` });

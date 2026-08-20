@@ -16,9 +16,10 @@
  *  - **Seam refresh** (both sides): the same normalized command repeated → the
  *    evidence is already in context; force a journal write and a *different*
  *    action. J-Space's "tool-seam refresh and recovery".
- *  - **Stale ledger**: no journal write in K steps → re-broadcast the digest
- *    (settled constraints re-asserted, not re-derived from the tail) and
- *    require an update.
+ *  - **Stale ledger**: no journal write in K steps → nudge a fresh journal
+ *    *write*. Settled-state decay is covered separately: the journal digest
+ *    re-broadcasts itself on the `sh` tail every `digestEvery` steps (and in
+ *    full after the first elision) — harness-enforced, never prompt-requested.
  *
  * Nudges ride the `sh` result — appended at the tail of the message the model
  * is about to read anyway, so they cost one cache-write increment and no extra
@@ -36,13 +37,18 @@ export interface BandTuning {
 	repeatAfter: number;
 	/** Submit rejections before the gate yields (and labels the envelope). */
 	maxSubmitRejections: number;
+	/**
+	 * Steps between mechanical journal-digest re-broadcasts on the `sh` tail.
+	 * Independent of the stale-journal *nudge*, which still asks for a fresh write.
+	 */
+	digestEvery: number;
 }
 
 /** Discrete behavior bands — J-Space's routing insight: bands, not knobs. */
 export const BANDS: Record<"quick" | "standard" | "deep", BandTuning> = {
-	quick: { journalStaleAfter: 5, inertiaAfter: 4, repeatAfter: 3, maxSubmitRejections: 2 },
-	standard: { journalStaleAfter: 8, inertiaAfter: 6, repeatAfter: 3, maxSubmitRejections: 2 },
-	deep: { journalStaleAfter: 8, inertiaAfter: 10, repeatAfter: 4, maxSubmitRejections: 3 },
+	quick: { journalStaleAfter: 5, inertiaAfter: 4, repeatAfter: 3, maxSubmitRejections: 2, digestEvery: 4 },
+	standard: { journalStaleAfter: 8, inertiaAfter: 6, repeatAfter: 3, maxSubmitRejections: 2, digestEvery: 6 },
+	deep: { journalStaleAfter: 8, inertiaAfter: 10, repeatAfter: 4, maxSubmitRejections: 3, digestEvery: 8 },
 };
 
 /** Commands whose execution plausibly changes the work tree. */
@@ -76,6 +82,11 @@ export class Supervisor {
 
 	get totalSteers(): number {
 		return this.counts.repeat + this.counts.inertia + this.counts.journal;
+	}
+
+	/** Band-tuned cadence for the mechanical journal digest on the `sh` tail. */
+	get digestEvery(): number {
+		return this.signals.tuning.digestEvery;
 	}
 
 	/** Record one executed command. Returns whether it looked write-ish. */
