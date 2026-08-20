@@ -17,8 +17,11 @@ import {
 import { Type } from "typebox";
 import type { Budget } from "./budget.ts";
 import type { CheckpointRecorder } from "./checkpoints.ts";
+import type { SubmitGate } from "./gate.ts";
 import { recordObservation, type RunLedger } from "./ledger.ts";
 import type { Supervisor } from "./supervisor.ts";
+
+export type { SubmitGate } from "./gate.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,9 +47,6 @@ export interface ShToolInput {
 	supervisor?: Supervisor;
 	/** Diff snapshots after write-ish commands. */
 	checkpoints?: CheckpointRecorder;
-	/** Caller's acceptance command; an in-run pass is tracked for the submit gate. */
-	accept?: string;
-	onAcceptPass?: (step: number) => void;
 	/** Step of the last journal write, for staleness nudges. */
 	lastJournalStep?: () => number;
 }
@@ -70,7 +70,7 @@ export const SH_COMMAND_PREFIX = [
  * timeout, and ledger-backed elision.
  */
 export function createShTool(input: ShToolInput): ToolDefinition {
-	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, accept, onAcceptPass, lastJournalStep } = input;
+	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, lastJournalStep } = input;
 	const base = createBashToolDefinition(cwd, { commandPrefix, exposeSessionEnvironment: false });
 
 	return {
@@ -93,17 +93,11 @@ export function createShTool(input: ShToolInput): ToolDefinition {
 
 			const result = await base.execute(toolCallId, withTimeout as never, signal, onUpdate, ctx);
 
-			// The supervisor sees every command: stall signals, acceptance passes,
-			// and whether this step plausibly moved the work tree (→ checkpoint).
+			// The supervisor sees every command: stall signals, and whether this
+			// step plausibly moved the work tree (→ checkpoint). Acceptance is
+			// no longer inferred from command text — the submit gate executes
+			// the predicate itself (see `gate.ts`).
 			const writeish = supervisor?.noteCommand(params.command) ?? false;
-			const exitCode = (result.details as { exitCode?: number | null } | undefined)?.exitCode;
-			if (
-				accept &&
-				exitCode === 0 &&
-				params.command.replace(/\s+/g, " ").includes(accept.replace(/\s+/g, " ").trim())
-			) {
-				onAcceptPass?.(budget.steps);
-			}
 			if (writeish && checkpoints?.active) {
 				await checkpoints.maybeSnapshot(budget.steps);
 			}
@@ -134,15 +128,6 @@ export interface SubmitDetails {
 }
 
 /**
- * The submit-gate verdict. J-Space's bridge-before-conclusion: a run may not
- * end until its claims are bridged to evidence — a journal with `Verified`
- * entries, and an observed acceptance pass when the caller declared one.
- */
-export interface SubmitGate {
-	(): { ok: true } | { ok: false; reason: string };
-}
-
-/**
  * `submit` — the explicit submission contract.
  *
  * mini-swe-agent's best idea. Scraping the last assistant message is
@@ -160,9 +145,9 @@ export function createSubmitTool(
 		description:
 			"Report your final result and end the run. Call this exactly once, as your last action. " +
 			"The run must be bridged to evidence first: at least one journal `verified` entry, and — when " +
-			"an acceptance command was declared — an observed pass of it in this run. A rejected submit " +
-			"does not end the run; fix what it names and resubmit. If you are out of budget, submit " +
-			"whatever you have verified so far rather than nothing.",
+			"an acceptance command was declared — the harness will execute it at submit time and require " +
+			"exit 0. A rejected submit does not end the run; fix what it names and resubmit. If you are " +
+			"out of budget, submit whatever you have verified so far rather than nothing.",
 		promptSnippet: "Report the final result and end the run",
 		parameters: Type.Object({
 			summary: Type.String({
@@ -177,7 +162,7 @@ export function createSubmitTool(
 			),
 		}),
 		async execute(_toolCallId, params) {
-			const verdict = gate?.() ?? { ok: true as const };
+			const verdict = (await gate?.()) ?? { ok: true as const };
 			if (!verdict.ok) {
 				onRejected?.();
 				return {

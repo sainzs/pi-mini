@@ -24,7 +24,8 @@ import {
 import { Budget, type BudgetLimits, type ExitReason, type TreeBudget } from "./budget.ts";
 import { CheckpointRecorder } from "./checkpoints.ts";
 import type { RunResult } from "./envelope.ts";
-import { createJournalState, createJournalTool, renderJournal, type JournalState } from "./journal.ts";
+import { createSubmitGate } from "./gate.ts";
+import { createJournalState, createJournalTool, renderJournal } from "./journal.ts";
 import { appendRecord, createLedger } from "./ledger.ts";
 import { captureLeaseBaseline, leaseViolations, observeChanges } from "./lease.ts";
 import { MiniResourceLoader } from "./loader.ts";
@@ -106,10 +107,6 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		tuning,
 	});
 	const checkpoints = new CheckpointRecorder(options.cwd, ledger.dir, leaseBaseline.root);
-	/** Step of the most recent in-run acceptance pass; -1 = never observed. */
-	let acceptPassStep = -1;
-	let submitRejections = 0;
-	let gateOverridden = false;
 
 	let submitted: SubmitDetails | undefined;
 	let sessionRef: AgentSession | undefined;
@@ -117,45 +114,15 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 
 	/**
 	 * The submit gate — J-Space's bridge-before-conclusion and verifier coverage,
-	 * moved from discipline into the harness:
-	 *
-	 *  1. At least one journal `verified` entry: claims must name the command
-	 *     output that proves them. Blocks the short-thought failure mode of a
-	 *     fluent conclusion delivered with no bridge.
-	 *  2. When the caller declared an acceptance command, it must have been
-	 *     OBSERVED passing in this run (exit 0, matched by command text). Blocks
-	 *     "I ran something like the tests and they seemed fine".
-	 *
-	 * Rejection is a steering message, not a wall: after `maxSubmitRejections`
-	 * the gate yields and labels the envelope `gateOverridden`, because a child
-	 * stuck in a gate loop only burns budget — and the harness re-runs the
-	 * acceptance predicate itself after the run regardless, so ground truth is
-	 * never the child's call.
+	 * moved from discipline into the harness. Acceptance is executed HERE, not
+	 * inferred from the child's `sh` command text (see `gate.ts`).
 	 */
-	const submitGate = (): { ok: true } | { ok: false; reason: string } => {
-		if (submitRejections >= tuning.maxSubmitRejections) {
-			gateOverridden = true;
-			return { ok: true };
-		}
-		if (journal.verified.length === 0) {
-			return {
-				ok: false,
-				reason:
-					"no journal `verified` entries. Bridge your conclusion to evidence: journal what you "
-					+ "proved, each entry naming the command output that proves it, then resubmit.",
-			};
-		}
-		if (options.accept && acceptPassStep < 0) {
-			return {
-				ok: false,
-				reason:
-					`the acceptance command has not been observed passing in this run. ` +
-					`Run \`${options.accept}\`, see it exit 0, then resubmit. If it cannot pass within ` +
-					`budget, journal that as an \`open\` item with the failing output and say so in your summary.`,
-			};
-		}
-		return { ok: true };
-	};
+	const { gate: submitGate, state: gateState } = createSubmitGate({
+		hasVerified: () => journal.verified.length > 0,
+		accept: options.accept,
+		cwd: options.cwd,
+		maxRejections: tuning.maxSubmitRejections,
+	});
 
 	/**
 	 * The pre-spend gate.
@@ -194,11 +161,6 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			commandPrefix: SH_COMMAND_PREFIX,
 			supervisor,
 			checkpoints,
-			accept: options.accept,
-			onAcceptPass: (step) => {
-				acceptPassStep = step;
-				appendRecord(ledger.transcript, { type: "accept_pass_observed", step });
-			},
 			lastJournalStep: () => journal.lastJournalStep,
 		}),
 		createSubmitTool(
@@ -207,8 +169,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			},
 			submitGate,
 			() => {
-				submitRejections++;
-				appendRecord(ledger.transcript, { type: "submit_rejected", count: submitRejections });
+				appendRecord(ledger.transcript, { type: "submit_rejected", count: gateState.rejections });
 			},
 		),
 		createJournalTool({ state: journal, dir: ledger.dir, currentStep: () => budget.steps }),
@@ -342,9 +303,9 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			steers: { ...supervisor.counts },
 			checkpoints: checkpoints.count,
 			...(checkpoints.count > 0 ? { checkpointsDir: checkpoints.dir } : {}),
-			submitRejections,
-			...(gateOverridden ? { gateOverridden: true } : {}),
-			...(options.accept ? { acceptPassObserved: acceptPassStep >= 0 } : {}),
+			submitRejections: gateState.rejections,
+			...(gateState.gateOverridden ? { gateOverridden: true } : {}),
+			...(options.accept ? { acceptPassObserved: gateState.acceptObservedPass } : {}),
 		},
 		...(error ? { error } : {}),
 		...(changes.unverifiable ? { error: [error, `[lease] ${changes.unverifiable}`].filter(Boolean).join("; ") } : {}),
