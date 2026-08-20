@@ -254,7 +254,7 @@ test("a non-git cwd makes the recorder inert", async () => {
 import { resolveSummonModel } from "../src/index.ts";
 
 function fakeRegistry(ids: Array<[string, string]>, authed = true) {
-	const models = ids.map(([provider, id]) => ({ provider, id }));
+	const models: Array<{ id?: string; provider?: string }> = ids.map(([provider, id]) => ({ provider, id }));
 	return {
 		find: (provider: string, modelId: string) =>
 			models.find((m) => m.provider === provider && m.id === modelId),

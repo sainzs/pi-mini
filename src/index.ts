@@ -24,11 +24,12 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { DEFAULT_LIMITS, TreeBudget } from "./budget.ts";
 import { formatEnvelope, isFailure } from "./envelope.ts";
 import { auditSummon } from "./ledger.ts";
+import { ProviderQueue } from "./queue.ts";
 import { runMiniAgent, type Band } from "./runner.ts";
 
 const DEPTH_ENV = "PI_MINI_DEPTH";
@@ -51,14 +52,10 @@ const BASE_DIR = join(homedir(), ".pi", "agent", "mini");
 const DEFAULT_MODEL_SPEC = "azure-foundry/DeepSeek-V4-Flash-0731";
 const MODEL_ENV = "PI_MINI_MODEL";
 
-type RegistryLike = {
-	find(provider: string, modelId: string): { id?: string; provider?: string } | undefined;
-	getAvailable(): Array<{ id?: string; provider?: string }>;
-	hasConfiguredAuth(model: unknown): boolean;
-};
+type ModelShape = { id?: string; provider?: string };
 
-export interface ResolvedSummonModel {
-	model: unknown | undefined;
+export interface ResolvedSummonModel<M extends ModelShape = ModelShape> {
+	model: M | undefined;
 	id: string;
 	/** Where the choice came from: param, env, built-in default, or inheritance. */
 	source: "param" | "env" | "default" | "inherited" | "inherited-fallback";
@@ -69,22 +66,28 @@ export interface ResolvedSummonModel {
  * matches case-insensitively, then by unique substring (azure-foundry wins
  * ties, since that is where the budget-friendly deployments live).
  */
-export function resolveSummonModel(
+export function resolveSummonModel<M extends ModelShape>(
 	spec: string | undefined,
-	registry: RegistryLike | undefined,
-	inherited: { id?: string; provider?: string } | undefined,
-): ResolvedSummonModel {
-	const inherit: ResolvedSummonModel = {
+	registry:
+		| {
+				find(provider: string, modelId: string): M | undefined;
+				getAvailable(): M[];
+				hasConfiguredAuth(model: M): boolean;
+			}
+		| undefined,
+	inherited: M | undefined,
+): ResolvedSummonModel<M> {
+	const inherit: ResolvedSummonModel<M> = {
 		model: inherited,
 		id: inherited?.id ?? "inherited-unknown",
 		source: "inherited",
 	};
 
-	const attempt = (s: string, source: ResolvedSummonModel["source"]): ResolvedSummonModel | undefined => {
+	const attempt = (s: string, source: ResolvedSummonModel<M>["source"]): ResolvedSummonModel<M> | undefined => {
 		if (!registry) return undefined;
 		const trimmed = s.trim();
 		if (!trimmed) return undefined;
-		let found: { id?: string; provider?: string } | undefined;
+		let found: M | undefined;
 		if (trimmed.includes("/")) {
 			const [provider, ...rest] = trimmed.split("/");
 			found = registry.find(provider, rest.join("/"));
@@ -115,7 +118,7 @@ export function resolveSummonModel(
 const currentDepth = Number(process.env[DEPTH_ENV] ?? 0);
 const treeBudget = new TreeBudget(TREE_CEILING_USD);
 
-/** Simple FIFO semaphore. */
+/** Total run cap; the provider queue below adds per-key limits and pacing. */
 class Semaphore {
 	private active = 0;
 	private readonly waiting: Array<() => void> = [];
@@ -142,6 +145,11 @@ class Semaphore {
 }
 
 const semaphore = new Semaphore(Math.max(1, MAX_CONCURRENCY));
+const providerQueue = new ProviderQueue();
+
+function summonQueueKey<M extends ModelShape>(resolved: ResolvedSummonModel<M>): string {
+	return `${resolved.model?.provider ?? "unknown"}/${resolved.model?.id ?? resolved.id}`;
+}
 
 /** Live runs, so a parent shutdown cannot leave orphans behind. */
 const live = new Set<AbortController>();
@@ -243,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const runId = randomUUID().slice(0, 8);
-			const cwd = params.cwd ?? (ctx as ExtensionContext | undefined)?.cwd ?? process.cwd();
+			const cwd = params.cwd ?? ctx.cwd ?? process.cwd();
 			const limits = {
 				steps: params.steps ?? DEFAULT_LIMITS.steps,
 				usd: params.usd ?? DEFAULT_LIMITS.usd,
@@ -271,15 +279,20 @@ export default function (pi: ExtensionAPI) {
 			signal?.addEventListener("abort", () => controller.abort(), { once: true });
 
 			const previousDepth = process.env[DEPTH_ENV];
-			const release = await semaphore.acquire();
-			const startedAt = Date.now();
+			const globalRelease = await semaphore.acquire();
+			let queueRelease: (() => void) | undefined;
+			let queueWaitMs = 0;
+			let startedAt = Date.now();
 
 			try {
+				const resolved = resolveSummonModel(params.model, ctx.modelRegistry, ctx.model);
+				const queueStartedAt = Date.now();
+				queueRelease = await providerQueue.acquire(summonQueueKey(resolved));
+				queueWaitMs = Date.now() - queueStartedAt;
+				startedAt = Date.now();
 				process.env[DEPTH_ENV] = String(currentDepth + 1);
 				onUpdate?.({ content: [{ type: "text", text: `mini ${runId}: starting` }], details: undefined });
 
-				const ectx = ctx as ExtensionContext | undefined;
-				const resolved = resolveSummonModel(params.model, ectx?.modelRegistry as never, ectx?.model as never);
 				const result = await runMiniAgent({
 					task: params.task,
 					contextPack: params.contextPack,
@@ -288,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 					tree: treeBudget,
 					baseDir: BASE_DIR,
 					runId,
-					model: resolved.model as never,
+					model: resolved.model,
 					retrieval: params.retrieval ?? "auto",
 					accept: params.accept,
 					lease: params.lease,
@@ -305,7 +318,7 @@ export default function (pi: ExtensionAPI) {
 				// verdict, cost. This is what turns delegation from lore into data —
 				// which model passes which task class at what price is answerable by
 				// grepping audit.ndjson instead of remembering.
-				const resolvedModel = resolved.model as { id?: string; provider?: string } | undefined;
+				const resolvedModel = resolved.model;
 				auditSummon(BASE_DIR, {
 					runId,
 					depth: currentDepth,
@@ -323,6 +336,7 @@ export default function (pi: ExtensionAPI) {
 					steps: result.steps,
 					costUsd: Number(result.costUsd.toFixed(4)),
 					elapsedMs: Date.now() - startedAt,
+					queueWaitMs,
 					treeSpentUsd: Number(treeBudget.spentUsd.toFixed(4)),
 					// J-Space control telemetry: how much steering this model needed on
 					// this task class. The diode made greppable.
@@ -339,14 +353,22 @@ export default function (pi: ExtensionAPI) {
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				auditSummon(BASE_DIR, { runId, depth: currentDepth, cwd, exitReason: "error", error: message });
+				auditSummon(BASE_DIR, {
+					runId,
+					depth: currentDepth,
+					cwd,
+					exitReason: "error",
+					error: message,
+					queueWaitMs,
+				});
 				return {
 					content: [{ type: "text" as const, text: `mini ${runId} failed to start: ${message}` }],
 					details: undefined,
 					isError: true,
 				};
 			} finally {
-				release();
+				queueRelease?.();
+				globalRelease();
 				live.delete(controller);
 				if (previousDepth === undefined) delete process.env[DEPTH_ENV];
 				else process.env[DEPTH_ENV] = previousDepth;
@@ -394,9 +416,8 @@ export default function (pi: ExtensionAPI) {
 			};
 			const controller = new AbortController();
 			live.add(controller);
-			const release = await semaphore.acquire();
-			const startedAt = Date.now();
-			const resolved = resolveSummonModel(parsed.model, ctx.modelRegistry as never, ctx.model as never);
+			const globalRelease = await semaphore.acquire();
+			const resolved = resolveSummonModel(parsed.model, ctx.modelRegistry, ctx.model);
 			ctx.ui.notify(
 				`mini ${runId}: starting (${parsed.band ?? "standard"} band, ${resolved.id} [${resolved.source}], ` +
 					`${limits.steps} steps / $${limits.usd.toFixed(2)} / ${Math.round(limits.wallMs / 60000)}m)`,
@@ -404,7 +425,14 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			const previousDepth = process.env[DEPTH_ENV];
+			let queueRelease: (() => void) | undefined;
+			let queueWaitMs = 0;
+			let startedAt = Date.now();
 			try {
+				const queueStartedAt = Date.now();
+				queueRelease = await providerQueue.acquire(summonQueueKey(resolved));
+				queueWaitMs = Date.now() - queueStartedAt;
+				startedAt = Date.now();
 				process.env[DEPTH_ENV] = String(currentDepth + 1);
 				const result = await runMiniAgent({
 					task: parsed.task,
@@ -413,7 +441,7 @@ export default function (pi: ExtensionAPI) {
 					tree: treeBudget,
 					baseDir: BASE_DIR,
 					runId,
-					model: resolved.model as never,
+					model: resolved.model,
 					retrieval: parsed.retrieval,
 					accept: parsed.accept,
 					lease: parsed.lease,
@@ -427,7 +455,7 @@ export default function (pi: ExtensionAPI) {
 				} catch {
 					// best-effort artifact
 				}
-				const ttyModel = resolved.model as { id?: string; provider?: string } | undefined;
+				const ttyModel = resolved.model;
 				auditSummon(BASE_DIR, {
 					runId,
 					depth: currentDepth,
@@ -445,6 +473,7 @@ export default function (pi: ExtensionAPI) {
 					steps: result.steps,
 					costUsd: Number(result.costUsd.toFixed(4)),
 					elapsedMs: Date.now() - startedAt,
+					queueWaitMs,
 					treeSpentUsd: Number(treeBudget.spentUsd.toFixed(4)),
 					steers: result.control.steers,
 					journalUpdates: result.control.journalUpdates,
@@ -463,10 +492,19 @@ export default function (pi: ExtensionAPI) {
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				auditSummon(BASE_DIR, { runId, depth: currentDepth, cwd: ctx.cwd, exitReason: "error", error: message, surface: "tty" });
+				auditSummon(BASE_DIR, {
+					runId,
+					depth: currentDepth,
+					cwd: ctx.cwd,
+					exitReason: "error",
+					error: message,
+					queueWaitMs,
+					surface: "tty",
+				});
 				ctx.ui.notify(`mini ${runId} failed to start: ${message}`, "error");
 			} finally {
-				release();
+				queueRelease?.();
+				globalRelease();
 				live.delete(controller);
 				if (previousDepth === undefined) delete process.env[DEPTH_ENV];
 				else process.env[DEPTH_ENV] = previousDepth;
