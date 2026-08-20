@@ -39,6 +39,79 @@ const TREE_CEILING_USD = Number(process.env.PI_MINI_TREE_USD ?? 25);
 
 const BASE_DIR = join(homedir(), ".pi", "agent", "mini-agent");
 
+/**
+ * The default summoned-run model. DeepSeek-V4-Flash-0731 is deliberate: it is
+ * the exact model the J-Space control plane was benchmarked on (NL2Repo
+ * 54.2→70.2, DeepSWE 54.4→67.4 with the ledger/gate/supervisor stack), and it
+ * is the cheapest strong deployment on the Azure Foundry resource. Override
+ * per run with the `model` param / `--model` flag, or globally with
+ * PI_MINI_MODEL. Unresolvable or unauthenticated specs fall back to
+ * inheriting the caller's model, never to a silent failure.
+ */
+const DEFAULT_MODEL_SPEC = "azure-foundry/DeepSeek-V4-Flash-0731";
+const MODEL_ENV = "PI_MINI_MODEL";
+
+type RegistryLike = {
+	find(provider: string, modelId: string): { id?: string; provider?: string } | undefined;
+	getAvailable(): Array<{ id?: string; provider?: string }>;
+	hasConfiguredAuth(model: unknown): boolean;
+};
+
+export interface ResolvedSummonModel {
+	model: unknown | undefined;
+	id: string;
+	/** Where the choice came from: param, env, built-in default, or inheritance. */
+	source: "param" | "env" | "default" | "inherited" | "inherited-fallback";
+}
+
+/**
+ * Resolve a model spec against the registry. `provider/id` is exact; a bare id
+ * matches case-insensitively, then by unique substring (azure-foundry wins
+ * ties, since that is where the budget-friendly deployments live).
+ */
+export function resolveSummonModel(
+	spec: string | undefined,
+	registry: RegistryLike | undefined,
+	inherited: { id?: string; provider?: string } | undefined,
+): ResolvedSummonModel {
+	const inherit: ResolvedSummonModel = {
+		model: inherited,
+		id: inherited?.id ?? "inherited-unknown",
+		source: "inherited",
+	};
+
+	const attempt = (s: string, source: ResolvedSummonModel["source"]): ResolvedSummonModel | undefined => {
+		if (!registry) return undefined;
+		const trimmed = s.trim();
+		if (!trimmed) return undefined;
+		let found: { id?: string; provider?: string } | undefined;
+		if (trimmed.includes("/")) {
+			const [provider, ...rest] = trimmed.split("/");
+			found = registry.find(provider, rest.join("/"));
+		} else {
+			const available = registry.getAvailable();
+			const exact = available.filter((m) => m.id?.toLowerCase() === trimmed.toLowerCase());
+			const pool = exact.length
+				? exact
+				: available.filter((m) => m.id?.toLowerCase().includes(trimmed.toLowerCase()));
+			found = pool.find((m) => m.provider === "azure-foundry") ?? pool[0];
+		}
+		if (!found || !registry.hasConfiguredAuth(found)) return undefined;
+		return { model: found, id: found.id ?? trimmed, source };
+	};
+
+	if (spec) {
+		const hit = attempt(spec, "param");
+		return hit ?? { ...inherit, source: "inherited-fallback" };
+	}
+	const env = process.env[MODEL_ENV];
+	if (env) {
+		const hit = attempt(env, "env");
+		return hit ?? { ...inherit, source: "inherited-fallback" };
+	}
+	return attempt(DEFAULT_MODEL_SPEC, "default") ?? { ...inherit, source: "inherited-fallback" };
+}
+
 const currentDepth = Number(process.env[DEPTH_ENV] ?? 0);
 const treeBudget = new TreeBudget(TREE_CEILING_USD);
 
@@ -157,6 +230,15 @@ export default function (pi: ExtensionAPI) {
 						"discrete on purpose; there is no useful middle knob.",
 				}),
 			),
+			model: Type.Optional(
+				Type.String({
+					description:
+						`Model for the run: \`provider/id\` or a bare id (e.g. \`${DEFAULT_MODEL_SPEC}\` — the ` +
+						"default, cheap and strong — or \`azure-foundry-claude/claude-opus-5\` for genuinely " +
+						"hard reasoning). Omit to use the default; an unresolvable or unauthenticated choice " +
+						"falls back to inheriting your model, flagged in the audit row.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -196,6 +278,8 @@ export default function (pi: ExtensionAPI) {
 				process.env[DEPTH_ENV] = String(currentDepth + 1);
 				onUpdate?.({ content: [{ type: "text", text: `mini ${runId}: starting` }], details: undefined });
 
+				const ectx = ctx as ExtensionContext | undefined;
+				const resolved = resolveSummonModel(params.model, ectx?.modelRegistry as never, ectx?.model as never);
 				const result = await runMiniAgent({
 					task: params.task,
 					contextPack: params.contextPack,
@@ -204,7 +288,7 @@ export default function (pi: ExtensionAPI) {
 					tree: treeBudget,
 					baseDir: BASE_DIR,
 					runId,
-					model: (ctx as ExtensionContext | undefined)?.model,
+					model: resolved.model as never,
 					retrieval: params.retrieval ?? "auto",
 					accept: params.accept,
 					lease: params.lease,
@@ -221,16 +305,15 @@ export default function (pi: ExtensionAPI) {
 				// verdict, cost. This is what turns delegation from lore into data —
 				// which model passes which task class at what price is answerable by
 				// grepping audit.ndjson instead of remembering.
-				const model = (ctx as ExtensionContext | undefined)?.model as
-					| { id?: string; provider?: string }
-					| undefined;
+				const resolvedModel = resolved.model as { id?: string; provider?: string } | undefined;
 				auditSummon(BASE_DIR, {
 					runId,
 					depth: currentDepth,
 					cwd,
 					task: params.task.slice(0, 400),
-					model: model?.id ?? "inherited-unknown",
-					provider: model?.provider,
+					model: resolvedModel?.id ?? "inherited-unknown",
+					modelSource: resolved.source,
+					provider: resolvedModel?.provider,
 					band: result.band,
 					exitReason: result.exitReason,
 					verified: result.verification ? result.verification.ok : "no-predicate",
@@ -282,8 +365,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("mini", {
 		description:
 			"Summon a bounded sub-run (journal + submit gate + supervisor). " +
-			"Flags: --band quick|standard|deep --steps N --usd X --minutes N --accept \"cmd\" " +
-			"--lease \"globs,comma-sep\" --cwd PATH --off (no scout). Rest is the brief.",
+			"Flags: --band quick|standard|deep --model \"id-or-provider/id\" --steps N --usd X " +
+			"--minutes N --accept \"cmd\" --lease \"globs,comma-sep\" --cwd PATH --off (no scout). " +
+			"Rest is the brief. Default model: DeepSeek-V4-Flash-0731.",
 		handler: async (args, ctx) => {
 			const parsed = parseCommandArgs(args);
 			if (!parsed.task) {
@@ -312,7 +396,12 @@ export default function (pi: ExtensionAPI) {
 			live.add(controller);
 			const release = await semaphore.acquire();
 			const startedAt = Date.now();
-			ctx.ui.notify(`mini ${runId}: starting (${parsed.band ?? "standard"} band, ${limits.steps} steps / $${limits.usd.toFixed(2)} / ${Math.round(limits.wallMs / 60000)}m)`, "info");
+			const resolved = resolveSummonModel(parsed.model, ctx.modelRegistry as never, ctx.model as never);
+			ctx.ui.notify(
+				`mini ${runId}: starting (${parsed.band ?? "standard"} band, ${resolved.id} [${resolved.source}], ` +
+					`${limits.steps} steps / $${limits.usd.toFixed(2)} / ${Math.round(limits.wallMs / 60000)}m)`,
+				"info",
+			);
 
 			const previousDepth = process.env[DEPTH_ENV];
 			try {
@@ -324,7 +413,7 @@ export default function (pi: ExtensionAPI) {
 					tree: treeBudget,
 					baseDir: BASE_DIR,
 					runId,
-					model: ctx.model,
+					model: resolved.model as never,
 					retrieval: parsed.retrieval,
 					accept: parsed.accept,
 					lease: parsed.lease,
@@ -338,14 +427,15 @@ export default function (pi: ExtensionAPI) {
 				} catch {
 					// best-effort artifact
 				}
-				const model = ctx.model as { id?: string; provider?: string } | undefined;
+				const ttyModel = resolved.model as { id?: string; provider?: string } | undefined;
 				auditSummon(BASE_DIR, {
 					runId,
 					depth: currentDepth,
 					cwd: parsed.cwd ?? ctx.cwd,
 					task: parsed.task.slice(0, 400),
-					model: model?.id ?? "tty-unknown",
-					provider: model?.provider,
+					model: ttyModel?.id ?? "tty-unknown",
+					modelSource: resolved.source,
+					provider: ttyModel?.provider,
 					band: result.band,
 					exitReason: result.exitReason,
 					verified: result.verification ? result.verification.ok : "no-predicate",
@@ -388,6 +478,7 @@ export default function (pi: ExtensionAPI) {
 interface CommandArgs {
 	task: string;
 	band?: Band;
+	model?: string;
 	steps?: number;
 	usd?: number;
 	minutes?: number;
@@ -415,6 +506,7 @@ function parseCommandArgs(args: string): CommandArgs {
 			case "--steps": out.steps = Math.max(1, Number(next()) || 0); break;
 			case "--usd": out.usd = Math.max(0.01, Number(next()) || 0); break;
 			case "--minutes": out.minutes = Math.max(1, Number(next()) || 0); break;
+			case "--model": out.model = next(); break;
 			case "--accept": out.accept = next(); break;
 			case "--lease": out.lease = next().split(",").map((s) => s.trim()).filter(Boolean); break;
 			case "--cwd": out.cwd = next(); break;

@@ -114,6 +114,27 @@ All of it lands in the audit row (`steers`, `journalUpdates`,
 `submitRejections`, `checkpoints`, `band`), so "how much steering does model X
 need on task class Y" is a grep over `audit.ndjson`, not lore.
 
+## Model routing (v0.3)
+
+Summoned runs default to **`azure-foundry/DeepSeek-V4-Flash-0731`** — the exact
+model the J-Space stack was benchmarked on, and the cheapest strong deployment
+on the Foundry resource. Resolution order:
+
+1. `model` param (tool) / `--model` flag (`/mini`) — `provider/id` or a bare id
+   (`"opus-5"` resolves; azure-foundry wins ties).
+2. `PI_MINI_MODEL` env var.
+3. The built-in default above.
+4. Unresolvable or unauthenticated specs **fall back to inheriting the caller's
+   model**, labelled `inherited-fallback` in the audit row — never a silent
+   dead binding (that failure class is what `binding_error` exists to catch).
+
+Route by task, not by habit: Flash-0731 for the bulk of bounded work,
+`azure-foundry-claude/claude-opus-5` (or fable-5) for genuinely hard reasoning,
+`azure-foundry/gpt-5.4-nano` when cost dominates. Pricing caveat: the Foundry
+DeepSeek deployments carry a zeroed `cost` entry in `models.json`, so the
+**step and wall budgets are the binding limits there** — the USD gate reads
+$0.00 and never trips.
+
 ## Install
 
 ```bash
@@ -265,6 +286,7 @@ A summoned run is **not a sandbox**. It has a real shell with your permissions.
 | `minutes` | Max wall-clock. Default 20. |
 | `retrieval` | `auto` (adds `locate` when the repo is Scout-indexed) or `off`. |
 | `band` | `quick` / `standard` (default) / `deep`. Entry routing: thinking level and steering cadence. |
+| `model` | `provider/id` or bare id. Default `azure-foundry/DeepSeek-V4-Flash-0731`; `PI_MINI_MODEL` overrides globally; bad specs inherit your model, flagged in the audit. |
 
 ## From the TTY: `/mini`
 

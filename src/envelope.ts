@@ -58,6 +58,8 @@ export interface RunResult {
 	steps: number;
 	costUsd: number;
 	band: Band;
+	/** Model id that ran, when known. */
+	model?: string;
 	control: ControlReport;
 	error?: string;
 }
@@ -89,6 +91,7 @@ export function formatEnvelope(result: RunResult): string {
 	].join(" · ");
 
 	const lines = [`status: ${result.exitReason}`, `spend: ${spend}`, `band: ${result.band}`];
+	if (result.model) lines.push(`model: ${result.model}`);
 
 	if (result.error) lines.push(`error: ${cap(result.error, 500)}`);
 

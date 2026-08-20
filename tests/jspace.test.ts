@@ -245,3 +245,63 @@ test("a non-git cwd makes the recorder inert", async () => {
 	assert.equal(rec.count, 0);
 	assert.ok(!existsSync(join(dir, "checkpoints")));
 });
+
+// ---------------------------------------------------------------------------
+// Model routing — the default is DeepSeek-V4-Flash-0731; overrides resolve.
+// ---------------------------------------------------------------------------
+
+import { resolveSummonModel } from "../src/index.ts";
+
+function fakeRegistry(ids: Array<[string, string]>, authed = true) {
+	const models = ids.map(([provider, id]) => ({ provider, id }));
+	return {
+		find: (provider: string, modelId: string) =>
+			models.find((m) => m.provider === provider && m.id === modelId),
+		getAvailable: () => models,
+		hasConfiguredAuth: () => authed,
+	};
+}
+
+const REG = fakeRegistry([
+	["azure-foundry", "DeepSeek-V4-Flash-0731"],
+	["azure-foundry", "gpt-5.6-sol"],
+	["azure-foundry-claude", "claude-opus-5"],
+]);
+
+test("no spec resolves to the DeepSeek-V4-Flash-0731 default", () => {
+	delete process.env.PI_MINI_MODEL;
+	const r = resolveSummonModel(undefined, REG, { id: "claude-fable-5" });
+	assert.equal(r.id, "DeepSeek-V4-Flash-0731");
+	assert.equal(r.source, "default");
+});
+
+test("an explicit provider/id param wins over the default", () => {
+	const r = resolveSummonModel("azure-foundry-claude/claude-opus-5", REG, undefined);
+	assert.equal(r.id, "claude-opus-5");
+	assert.equal(r.source, "param");
+});
+
+test("bare ids resolve case-insensitively and by substring", () => {
+	assert.equal(resolveSummonModel("deepseek-v4-flash-0731", REG, undefined).id, "DeepSeek-V4-Flash-0731");
+	assert.equal(resolveSummonModel("opus-5", REG, undefined).id, "claude-opus-5");
+});
+
+test("PI_MINI_MODEL overrides the default but loses to an explicit param", () => {
+	process.env.PI_MINI_MODEL = "azure-foundry/gpt-5.6-sol";
+	try {
+		assert.equal(resolveSummonModel(undefined, REG, undefined).source, "env");
+		assert.equal(resolveSummonModel(undefined, REG, undefined).id, "gpt-5.6-sol");
+		assert.equal(resolveSummonModel("claude-opus-5", REG, undefined).source, "param");
+	} finally {
+		delete process.env.PI_MINI_MODEL;
+	}
+});
+
+test("unresolvable or unauthenticated specs inherit, labelled as fallback", () => {
+	const bad = resolveSummonModel("azure-foundry/No-Such-Model", REG, { id: "claude-fable-5" });
+	assert.equal(bad.id, "claude-fable-5");
+	assert.equal(bad.source, "inherited-fallback");
+
+	const noauth = fakeRegistry([["azure-foundry", "DeepSeek-V4-Flash-0731"]], false);
+	assert.equal(resolveSummonModel(undefined, noauth, { id: "x" }).source, "inherited-fallback");
+});

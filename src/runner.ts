@@ -320,6 +320,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		steps: budget.steps,
 		costUsd: budget.usd,
 		band,
+		...(options.model?.id ? { model: options.model.id } : {}),
 		control: {
 			journalUpdates: journal.updates,
 			verifiedEntries: journal.verified.length,
