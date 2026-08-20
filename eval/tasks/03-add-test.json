@@ -1,0 +1,14 @@
+{
+	"id": "03-add-test",
+	"brief": "clamp.ts exports clamp(value, min, max) but ships no tests. Write clamp.test.ts using node:test and node:assert/strict, importing from ./clamp.ts, covering: below min clamps to min, above max clamps to max, inside the range is returned unchanged. Run the test until it is green, then submit.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"cat > clamp.ts <<'EOF'\nexport function clamp(value: number, min: number, max: number): number {\n\tif (value < min) return min;\n\tif (value > max) return max;\n\treturn value;\n}\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"accept": "test -f clamp.test.ts && node --experimental-strip-types --test clamp.test.ts",
+	"lease": ["clamp.test.ts"],
+	"band": "standard",
+	"limits": { "steps": 10, "usd": 1, "wallMs": 300000 },
+	"expect": { "kind": "accept-pass" }
+}

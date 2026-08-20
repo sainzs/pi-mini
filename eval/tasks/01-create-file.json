@@ -1,0 +1,14 @@
+{
+	"id": "01-create-file",
+	"brief": "Create a file named hello.txt in the current directory, containing exactly one line: hello. Verify it with cat, then submit. Do nothing else.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"cat > README.md <<'EOF'\n# fixture\n\nScratch repo for eval task 01.\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"accept": "test -f hello.txt && grep -qx hello hello.txt",
+	"lease": ["hello.txt"],
+	"band": "standard",
+	"limits": { "steps": 8, "usd": 1, "wallMs": 300000 },
+	"expect": { "kind": "accept-pass" }
+}

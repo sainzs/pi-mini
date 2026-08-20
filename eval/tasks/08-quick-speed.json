@@ -1,0 +1,14 @@
+{
+	"id": "08-quick-speed",
+	"brief": "Create a file named status.txt in the current directory, containing exactly one line: ok. Verify it with cat, then submit immediately.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"cat > README.md <<'EOF'\n# fixture\n\nScratch repo for eval task 08.\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"accept": "test -f status.txt && grep -qx ok status.txt",
+	"lease": ["status.txt"],
+	"band": "quick",
+	"limits": { "steps": 5, "usd": 0.5, "wallMs": 180000 },
+	"expect": { "kind": "accept-pass" }
+}

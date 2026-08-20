@@ -1,0 +1,15 @@
+{
+	"id": "05-investigate",
+	"brief": "Read-only investigation — do not create, modify or delete any file. This repo contains a retry helper. Answer two questions in your submit summary: (1) how many attempts does it make by default, and where is that default set? (2) what delay does it use between attempts, and does the delay grow? Journal each answer as a `verified` entry once you have seen it in the code (name the file:line that proves it), then submit.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"mkdir -p src",
+		"cat > src/retry.ts <<'EOF'\nexport interface RetryOptions {\n\tattempts?: number;\n\tdelayMs?: number;\n}\n\nexport async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {\n\tconst attempts = options.attempts ?? 3;\n\tconst delayMs = options.delayMs ?? 100;\n\tlet lastError: unknown;\n\tfor (let attempt = 1; attempt <= attempts; attempt++) {\n\t\ttry {\n\t\t\treturn await fn();\n\t\t} catch (error) {\n\t\t\tlastError = error;\n\t\t\tif (attempt < attempts) {\n\t\t\t\tawait new Promise((resolve) => setTimeout(resolve, delayMs * attempt));\n\t\t\t}\n\t\t}\n\t}\n\tthrow lastError;\n}\nEOF",
+		"cat > src/index.ts <<'EOF'\nexport { withRetry } from \"./retry.ts\";\nexport type { RetryOptions } from \"./retry.ts\";\nEOF",
+		"cat > README.md <<'EOF'\n# fixture\n\nSmall retry library, read by eval task 05.\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"band": "standard",
+	"limits": { "steps": 12, "usd": 1, "wallMs": 300000 },
+	"expect": { "kind": "investigation", "minVerified": 2 }
+}

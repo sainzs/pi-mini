@@ -1,0 +1,15 @@
+{
+	"id": "02-fix-bug",
+	"brief": "add.ts exports add(a, b), but the implementation is wrong and the test suite proves it. Fix add.ts so the suite passes. Do not modify add.test.ts.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"cat > add.ts <<'EOF'\nexport function add(a: number, b: number): number {\n\treturn a - b;\n}\nEOF",
+		"cat > add.test.ts <<'EOF'\nimport assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { add } from \"./add.ts\";\n\ntest(\"add sums two numbers\", () => {\n\tassert.equal(add(2, 3), 5);\n\tassert.equal(add(-1, 1), 0);\n\tassert.equal(add(0, 0), 0);\n});\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"accept": "node --experimental-strip-types --test add.test.ts",
+	"lease": ["add.ts"],
+	"band": "standard",
+	"limits": { "steps": 10, "usd": 1, "wallMs": 300000 },
+	"expect": { "kind": "accept-pass" }
+}

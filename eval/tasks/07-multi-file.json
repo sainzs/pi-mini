@@ -1,0 +1,17 @@
+{
+	"id": "07-multi-file",
+	"brief": "Split src/math.ts into two modules: src/double.ts (exporting double) and src/triple.ts (exporting triple). Update src/index.ts to re-export both from the new modules, then delete src/math.ts. The public API must keep working: test/api.test.ts imports from src/index.ts and must pass untouched. Do not modify anything under test/.",
+	"setup": [
+		"git init -q && git config user.email eval@pi-mini.local && git config user.name eval && git config commit.gpgsign false",
+		"mkdir -p src test",
+		"cat > src/math.ts <<'EOF'\nexport function double(n: number): number {\n\treturn n * 2;\n}\n\nexport function triple(n: number): number {\n\treturn n * 3;\n}\nEOF",
+		"cat > src/index.ts <<'EOF'\nexport { double, triple } from \"./math.ts\";\nEOF",
+		"cat > test/api.test.ts <<'EOF'\nimport assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { double, triple } from \"../src/index.ts\";\n\ntest(\"public API doubles and triples\", () => {\n\tassert.equal(double(4), 8);\n\tassert.equal(triple(4), 12);\n});\nEOF",
+		"git add -A && git commit -qm init"
+	],
+	"accept": "test -f src/double.ts && test -f src/triple.ts && ! test -f src/math.ts && node --experimental-strip-types --test test/api.test.ts",
+	"lease": ["src/**"],
+	"band": "standard",
+	"limits": { "steps": 14, "usd": 1.5, "wallMs": 300000 },
+	"expect": { "kind": "accept-pass" }
+}

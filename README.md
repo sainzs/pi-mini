@@ -135,6 +135,13 @@ DeepSeek deployments carry a zeroed `cost` entry in `models.json`, so the
 **step and wall budgets are the binding limits there** — the USD gate reads
 $0.00 and never trips.
 
+### Own numbers: `npm run eval`
+
+`eval/tasks/` holds 8 self-contained tasks (fixtures generated into tmp git repos, no network).
+`npm run eval -- [--model provider/id] [--tasks a,b]` writes `eval/results/<model>-<stamp>.{ndjson,md}`;
+`--dry-run` validates fixtures + accept predicates with zero model calls (CI-safe).
+Rule: default-model claims here cite an `eval/results/` artifact, not third-party benchmarks.
+
 ## Install
 
 ```bash
