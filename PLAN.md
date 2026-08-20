@@ -46,6 +46,21 @@ a 0.1 coefficient.
 | `src/runner.ts` | Builds + drives one nested session |
 | `src/index.ts` | Extension entry: `mini` tool, depth guard, semaphore |
 
+## v0.3: the J-Space control plane
+
+v0.2 verified results; v0.3 governs process, porting J-Space Cognition Suite
+V3.6 semantics (ledger, bridge-before-conclusion, verifier coverage, seam
+refresh, differential checkpoints, discrete bands):
+
+| # | Decision | Why |
+|---|---|---|
+| J1 | **Structured `journal` tool, full-state writes, hard caps.** | Externalized state beats transcript memory against drift; last-write-wins is self-healing; caps are code, not pleas. |
+| J2 | **Submit gate: `verified` entries + observed acceptance pass required; yields after 2–3 rejections, labelled `gateOverridden`.** | Bridge-before-conclusion as a contract. The gate bounds negligence; the harness's own predicate re-run remains ground truth, so yielding costs nothing but budget. |
+| J3 | **Supervisor nudges ride the `sh` result tail, ≤350 chars, once per cooldown.** | The harness sees every command; steering at the observation seam costs one cache-write increment and no extra turn. |
+| J4 | **Checkpoints are `git diff HEAD` snapshots, write-ish-triggered, size/count-capped.** | Recovery to a known-good intermediate instead of judge-at-the-end. Never on the model's critical path. |
+| J5 | **Bands `quick\|standard\|deep`, not knobs; `standard` inherits thinking.** | J-Space's routing finding: the middle is an unstable transition zone, not a usable intermediate. |
+| J6 | **TTY surface `/mini` summons directly.** | The human writes the brief; no parent-LLM turn. Same budgets, same audit. |
+
 ## Non-goals (v1)
 
 Rust/native binaries; chains and DAGs (the calling agent sequences tool calls);

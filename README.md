@@ -69,6 +69,51 @@ What this deliberately does not claim: the predicate bounds negligence and
 self-deception, not adversarial children — those are a model-quality problem no
 post-hoc check solves.
 
+## The J-Space control plane (v0.3)
+
+v0.2 verified the *result*. v0.3 governs the *process*, porting the J-Space
+Cognition Suite's inference-time controls (semantics, not code — see Credits).
+
+J-Space's core observation is the **chain-of-thought diode**: a session locks
+into one of two stable modes and cannot re-balance mid-flight. Short-thought
+runs converge prematurely: fluent conclusions, no evidence bridge, "done" after
+the first green check. Long-thought runs drift: analysis inertia, re-planning
+from stale assumptions, no convergence. The runtime cannot switch the mode —
+but it sees every command, so it detects the mode's characteristic stall and
+injects a bounded correction:
+
+- **`journal` — the loop ledger.** The run externalizes state into
+  `goal / core / verified / open / next` (capped, full-state writes, persisted
+  to `runs/<id>/journal.md`). Settled constraints are re-broadcast when the
+  ledger goes stale instead of decaying in the transcript tail.
+- **The submit gate — bridge-before-conclusion.** `submit` is *rejected* while
+  `verified` is empty, and — when the caller declared `accept` — until that
+  command has been **observed passing in-run** (exit 0, matched by command
+  text). Rejection names exactly what is missing and does not end the run.
+  After 2–3 rejections the gate yields and labels the envelope
+  `gateOverridden`, because a gate loop only burns budget — and the harness
+  re-runs the predicate itself regardless, so ground truth was never the
+  child's call.
+- **The supervisor — seam refresh & inertia breaks.** Repeated identical
+  commands (evidence already in context), read-only drift on a write task
+  (long-thought inertia), and stale journals each trigger a ≤350-char
+  `[supervisor]` nudge riding the tail of the `sh` result — one cache-write
+  increment, no extra turn. Each kind fires at most once per cooldown window.
+- **Checkpoints — differential recovery.** After any write-ish command, if the
+  dirty-set fingerprint moved, `git diff HEAD` is snapshotted to
+  `runs/<id>/checkpoints/NNN.patch`. A flailing run can be rolled back to any
+  recorded intermediate (`git apply -R`), not just judged at the end. Untracked
+  files are indexed and honestly labelled as not-in-the-patch.
+- **Bands — discrete entry routing.** `band: quick | standard | deep`. J-Space's
+  routing insight: behavior bands are attractors, not a continuous depth knob.
+  `quick` pins low thinking and a tight steering cadence; `deep` pins high
+  thinking with a patient inertia window and more steps; `standard` inherits
+  the caller's thinking level.
+
+All of it lands in the audit row (`steers`, `journalUpdates`,
+`submitRejections`, `checkpoints`, `band`), so "how much steering does model X
+need on task class Y" is a grep over `audit.ndjson`, not lore.
+
 ## Install
 
 ```bash
@@ -219,6 +264,22 @@ A summoned run is **not a sandbox**. It has a real shell with your permissions.
 | `usd` | Max spend. Default $3.00 (mini-swe-agent's default). |
 | `minutes` | Max wall-clock. Default 20. |
 | `retrieval` | `auto` (adds `locate` when the repo is Scout-indexed) or `off`. |
+| `band` | `quick` / `standard` (default) / `deep`. Entry routing: thinking level and steering cadence. |
+
+## From the TTY: `/mini`
+
+The same runtime is a slash command in interactive sessions — the human writes
+the brief, no parent-LLM turn required:
+
+```
+/mini --band deep --steps 60 --accept "npm test -- retry" --lease "src/http/**"
+      Fix the flaky retry in src/http/retry.ts
+```
+
+Flags are optional; bare `/mini <task>` is a standard-band run. Progress and
+the final verdict arrive as notifications; the full envelope lands in
+`~/.pi/agent/mini-agent/runs/<id>/envelope.md` and the audit row is tagged
+`surface: "tty"`.
 
 Environment: `PI_MINI_MAX_DEPTH` (1), `PI_MINI_CONCURRENCY` (2),
 `PI_MINI_TREE_USD` (25).
@@ -246,5 +307,14 @@ Semantics ported from [mini-swe-agent](https://github.com/SWE-agent/mini-swe-age
 explicit submission, output elision with an explicit marker, and shell hygiene
 (`PAGER=cat`, `TQDM_DISABLE=1`). No code was copied; the model layer,
 environments, and text-based action parsing were deliberately not ported.
+
+Control-plane semantics informed by the [J-Space Cognition Suite V3.6](https://github.com/Tiger3807861189/J-Space-Cognition-Suite-V3.6)
+engineering record (© 2026 Tiger3807861189, CC BY-ND 4.0;
+[DOI 10.5281/zenodo.21977271](https://doi.org/10.5281/zenodo.21977271)): the
+Goal/Core/Verified/Open/Next ledger, bridge-before-conclusion, verifier
+coverage, seam refresh, differential checkpoints, and discrete routing bands.
+The report is operational prose; no text was copied, and its own caveat applies
+here: these are engineering mitigations of observed session failure modes, not
+evidence about any model's internals.
 
 MIT.

@@ -21,6 +21,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -28,7 +29,7 @@ import { Type } from "typebox";
 import { DEFAULT_LIMITS, TreeBudget } from "./budget.ts";
 import { formatEnvelope, isFailure } from "./envelope.ts";
 import { auditSummon } from "./ledger.ts";
-import { runMiniAgent } from "./runner.ts";
+import { runMiniAgent, type Band } from "./runner.ts";
 
 const DEPTH_ENV = "PI_MINI_DEPTH";
 const MAX_DEPTH = Number(process.env.PI_MINI_MAX_DEPTH ?? 1);
@@ -147,6 +148,15 @@ export default function (pi: ExtensionAPI) {
 						"the lease fails the result. Omit only for read-only work.",
 				}),
 			),
+			band: Type.Optional(
+				Type.Union([Type.Literal("quick"), Type.Literal("standard"), Type.Literal("deep")], {
+					description:
+						"Behavior band, routed at entry. `quick`: short-horizon tasks — low thinking, tight " +
+						"steering cadence. `deep`: long-horizon — high thinking, more steps, patient inertia " +
+						"window. `standard` (default): inherits the caller's thinking level. Bands are " +
+						"discrete on purpose; there is no useful middle knob.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -198,6 +208,7 @@ export default function (pi: ExtensionAPI) {
 					retrieval: params.retrieval ?? "auto",
 					accept: params.accept,
 					lease: params.lease,
+					band: params.band,
 					signal: controller.signal,
 					onProgress: (text) =>
 						onUpdate?.({
@@ -220,6 +231,7 @@ export default function (pi: ExtensionAPI) {
 					task: params.task.slice(0, 400),
 					model: model?.id ?? "inherited-unknown",
 					provider: model?.provider,
+					band: result.band,
 					exitReason: result.exitReason,
 					verified: result.verification ? result.verification.ok : "no-predicate",
 					leaseViolations: result.leaseViolations?.length ?? 0,
@@ -229,6 +241,12 @@ export default function (pi: ExtensionAPI) {
 					costUsd: Number(result.costUsd.toFixed(4)),
 					elapsedMs: Date.now() - startedAt,
 					treeSpentUsd: Number(treeBudget.spentUsd.toFixed(4)),
+					// J-Space control telemetry: how much steering this model needed on
+					// this task class. The diode made greppable.
+					steers: result.control.steers,
+					journalUpdates: result.control.journalUpdates,
+					submitRejections: result.control.submitRejections,
+					checkpoints: result.control.checkpoints,
 				});
 
 				return {
@@ -252,4 +270,158 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 	});
+
+	// The TTY surface: `/mini` summons a run directly from the interactive
+	// prompt — no parent-LLM turn, no tool-call round trip. The human writes
+	// the brief; the runtime supplies the discipline.
+	//
+	//   /mini --band deep --steps 60 --accept "npm test -- retry" --lease "src/http/**"
+	//         Fix the flaky retry in src/http/retry.ts
+	//
+	// Flags are optional; bare `/mini <task>` is a standard-band run.
+	pi.registerCommand("mini", {
+		description:
+			"Summon a bounded sub-run (journal + submit gate + supervisor). " +
+			"Flags: --band quick|standard|deep --steps N --usd X --minutes N --accept \"cmd\" " +
+			"--lease \"globs,comma-sep\" --cwd PATH --off (no scout). Rest is the brief.",
+		handler: async (args, ctx) => {
+			const parsed = parseCommandArgs(args);
+			if (!parsed.task) {
+				ctx.ui.notify(
+					"Usage: /mini [--band quick|standard|deep] [--steps N] [--usd X] [--minutes N] " +
+						"[--accept \"cmd\"] [--lease \"g1,g2\"] [--cwd PATH] [--off] <task brief>",
+					"warning",
+				);
+				return;
+			}
+			if (treeBudget.exhausted) {
+				ctx.ui.notify(
+					`mini: tree ceiling $${TREE_CEILING_USD.toFixed(2)} is spent ($${treeBudget.spentUsd.toFixed(2)}).`,
+					"error",
+				);
+				return;
+			}
+
+			const runId = randomUUID().slice(0, 8);
+			const limits = {
+				steps: parsed.steps ?? DEFAULT_LIMITS.steps,
+				usd: parsed.usd ?? DEFAULT_LIMITS.usd,
+				wallMs: (parsed.minutes ?? DEFAULT_LIMITS.wallMs / 60000) * 60_000,
+			};
+			const controller = new AbortController();
+			live.add(controller);
+			const release = await semaphore.acquire();
+			const startedAt = Date.now();
+			ctx.ui.notify(`mini ${runId}: starting (${parsed.band ?? "standard"} band, ${limits.steps} steps / $${limits.usd.toFixed(2)} / ${Math.round(limits.wallMs / 60000)}m)`, "info");
+
+			const previousDepth = process.env[DEPTH_ENV];
+			try {
+				process.env[DEPTH_ENV] = String(currentDepth + 1);
+				const result = await runMiniAgent({
+					task: parsed.task,
+					cwd: parsed.cwd ?? ctx.cwd,
+					limits,
+					tree: treeBudget,
+					baseDir: BASE_DIR,
+					runId,
+					model: ctx.model,
+					retrieval: parsed.retrieval,
+					accept: parsed.accept,
+					lease: parsed.lease,
+					band: parsed.band,
+					signal: controller.signal,
+				});
+
+				const envelope = formatEnvelope(result);
+				try {
+					writeFileSync(join(BASE_DIR, "runs", runId, "envelope.md"), envelope, "utf-8");
+				} catch {
+					// best-effort artifact
+				}
+				const model = ctx.model as { id?: string; provider?: string } | undefined;
+				auditSummon(BASE_DIR, {
+					runId,
+					depth: currentDepth,
+					cwd: parsed.cwd ?? ctx.cwd,
+					task: parsed.task.slice(0, 400),
+					model: model?.id ?? "tty-unknown",
+					provider: model?.provider,
+					band: result.band,
+					exitReason: result.exitReason,
+					verified: result.verification ? result.verification.ok : "no-predicate",
+					leaseViolations: result.leaseViolations?.length ?? 0,
+					filesChanged: result.filesChanged.length,
+					filesChangedSource: result.filesChangedSource,
+					steps: result.steps,
+					costUsd: Number(result.costUsd.toFixed(4)),
+					elapsedMs: Date.now() - startedAt,
+					treeSpentUsd: Number(treeBudget.spentUsd.toFixed(4)),
+					steers: result.control.steers,
+					journalUpdates: result.control.journalUpdates,
+					submitRejections: result.control.submitRejections,
+					checkpoints: result.control.checkpoints,
+					surface: "tty",
+				});
+
+				const verdict = result.verification
+					? result.verification.ok ? "verified PASS" : "verified FAIL"
+					: result.exitReason;
+				ctx.ui.notify(
+					`mini ${runId}: ${verdict} · ${result.steps} steps · $${result.costUsd.toFixed(4)} · ` +
+						`envelope ${join(BASE_DIR, "runs", runId, "envelope.md")}`,
+					isFailure(result) ? "warning" : "info",
+				);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				auditSummon(BASE_DIR, { runId, depth: currentDepth, cwd: ctx.cwd, exitReason: "error", error: message, surface: "tty" });
+				ctx.ui.notify(`mini ${runId} failed to start: ${message}`, "error");
+			} finally {
+				release();
+				live.delete(controller);
+				if (previousDepth === undefined) delete process.env[DEPTH_ENV];
+				else process.env[DEPTH_ENV] = previousDepth;
+			}
+		},
+	});
+}
+
+interface CommandArgs {
+	task: string;
+	band?: Band;
+	steps?: number;
+	usd?: number;
+	minutes?: number;
+	accept?: string;
+	lease?: string[];
+	cwd?: string;
+	retrieval: "auto" | "off";
+}
+
+/** Shell-ish flag parsing for the /mini command: --flag value, \"--quoted\" values. */
+function parseCommandArgs(args: string): CommandArgs {
+	const tokens = args.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+	const out: CommandArgs = { task: "", retrieval: "auto" };
+	const rest: string[] = [];
+	const unquote = (s: string) => s.replace(/^["']|["']$/g, "");
+	for (let i = 0; i < tokens.length; i++) {
+		const tok = tokens[i];
+		const next = () => unquote(tokens[++i] ?? "");
+		switch (tok) {
+			case "--band": {
+				const b = next();
+				if (b === "quick" || b === "standard" || b === "deep") out.band = b;
+				break;
+			}
+			case "--steps": out.steps = Math.max(1, Number(next()) || 0); break;
+			case "--usd": out.usd = Math.max(0.01, Number(next()) || 0); break;
+			case "--minutes": out.minutes = Math.max(1, Number(next()) || 0); break;
+			case "--accept": out.accept = next(); break;
+			case "--lease": out.lease = next().split(",").map((s) => s.trim()).filter(Boolean); break;
+			case "--cwd": out.cwd = next(); break;
+			case "--off": out.retrieval = "off"; break;
+			default: rest.push(tok);
+		}
+	}
+	out.task = rest.join(" ").trim();
+	return out;
 }

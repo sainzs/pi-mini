@@ -22,11 +22,14 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Budget, type BudgetLimits, type ExitReason, type TreeBudget } from "./budget.ts";
+import { CheckpointRecorder } from "./checkpoints.ts";
 import type { RunResult } from "./envelope.ts";
+import { createJournalState, createJournalTool, renderJournal, type JournalState } from "./journal.ts";
 import { appendRecord, createLedger } from "./ledger.ts";
 import { captureLeaseBaseline, leaseViolations, observeChanges } from "./lease.ts";
 import { MiniResourceLoader } from "./loader.ts";
 import { buildSystemPrompt, buildTaskMessage } from "./prompt.ts";
+import { BANDS, Supervisor } from "./supervisor.ts";
 import { runAcceptance } from "./verify.ts";
 import {
 	createLocateTool,
@@ -36,6 +39,21 @@ import {
 	SH_COMMAND_PREFIX,
 	type SubmitDetails,
 } from "./tools.ts";
+
+/** pi's documented thinking levels (`pi --help`); pi-agent-core is not a direct dep. */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Discrete behavior bands — J-Space's routing insight, and its caution: treat
+ * bands as attractors, not a continuous depth knob. `standard` inherits the
+ * caller's thinking level rather than pinning an unstable middle.
+ */
+export type Band = "quick" | "standard" | "deep";
+const BAND_THINKING: Record<Band, ThinkingLevel | undefined> = {
+	quick: "low",
+	standard: undefined,
+	deep: "high",
+};
 
 export interface RunOptions {
 	task: string;
@@ -57,6 +75,8 @@ export interface RunOptions {
 	accept?: string;
 	/** Write-set lease: glob/path patterns the child may change. Observed, not sandboxed. */
 	lease?: string[];
+	/** Behavior band: entry routing + supervisor cadence. Default `standard`. */
+	band?: Band;
 	signal?: AbortSignal;
 	onProgress?: (text: string) => void;
 }
@@ -76,9 +96,66 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 
 	const hasLocate = options.retrieval === "auto" && (await scoutCanServe(options.cwd));
 
+	// The J-Space control plane for this run: externalized ledger (journal),
+	// stall/inertia detection (supervisor), and recovery points (checkpoints).
+	const band: Band = options.band ?? "standard";
+	const tuning = BANDS[band];
+	const journal = createJournalState();
+	const supervisor = new Supervisor({
+		expectsWrite: (options.lease?.length ?? 0) > 0,
+		tuning,
+	});
+	const checkpoints = new CheckpointRecorder(options.cwd, ledger.dir, leaseBaseline.root);
+	/** Step of the most recent in-run acceptance pass; -1 = never observed. */
+	let acceptPassStep = -1;
+	let submitRejections = 0;
+	let gateOverridden = false;
+
 	let submitted: SubmitDetails | undefined;
 	let sessionRef: AgentSession | undefined;
 	let stopReason: ExitReason | undefined;
+
+	/**
+	 * The submit gate — J-Space's bridge-before-conclusion and verifier coverage,
+	 * moved from discipline into the harness:
+	 *
+	 *  1. At least one journal `verified` entry: claims must name the command
+	 *     output that proves them. Blocks the short-thought failure mode of a
+	 *     fluent conclusion delivered with no bridge.
+	 *  2. When the caller declared an acceptance command, it must have been
+	 *     OBSERVED passing in this run (exit 0, matched by command text). Blocks
+	 *     "I ran something like the tests and they seemed fine".
+	 *
+	 * Rejection is a steering message, not a wall: after `maxSubmitRejections`
+	 * the gate yields and labels the envelope `gateOverridden`, because a child
+	 * stuck in a gate loop only burns budget — and the harness re-runs the
+	 * acceptance predicate itself after the run regardless, so ground truth is
+	 * never the child's call.
+	 */
+	const submitGate = (): { ok: true } | { ok: false; reason: string } => {
+		if (submitRejections >= tuning.maxSubmitRejections) {
+			gateOverridden = true;
+			return { ok: true };
+		}
+		if (journal.verified.length === 0) {
+			return {
+				ok: false,
+				reason:
+					"no journal `verified` entries. Bridge your conclusion to evidence: journal what you "
+					+ "proved, each entry naming the command output that proves it, then resubmit.",
+			};
+		}
+		if (options.accept && acceptPassStep < 0) {
+			return {
+				ok: false,
+				reason:
+					`the acceptance command has not been observed passing in this run. ` +
+					`Run \`${options.accept}\`, see it exit 0, then resubmit. If it cannot pass within ` +
+					`budget, journal that as an \`open\` item with the failing output and say so in your summary.`,
+			};
+		}
+		return { ok: true };
+	};
 
 	/**
 	 * The pre-spend gate.
@@ -110,10 +187,31 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	};
 
 	const tools: ToolDefinition[] = [
-		createShTool({ cwd: options.cwd, budget, ledger, commandPrefix: SH_COMMAND_PREFIX }),
-		createSubmitTool((details) => {
-			submitted = details;
+		createShTool({
+			cwd: options.cwd,
+			budget,
+			ledger,
+			commandPrefix: SH_COMMAND_PREFIX,
+			supervisor,
+			checkpoints,
+			accept: options.accept,
+			onAcceptPass: (step) => {
+				acceptPassStep = step;
+				appendRecord(ledger.transcript, { type: "accept_pass_observed", step });
+			},
+			lastJournalStep: () => journal.lastJournalStep,
 		}),
+		createSubmitTool(
+			(details) => {
+				submitted = details;
+			},
+			submitGate,
+			() => {
+				submitRejections++;
+				appendRecord(ledger.transcript, { type: "submit_rejected", count: submitRejections });
+			},
+		),
+		createJournalTool({ state: journal, dir: ledger.dir, currentStep: () => budget.steps }),
 	];
 	if (hasLocate) tools.push(createLocateTool(options.cwd));
 
@@ -122,12 +220,16 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		hasLocate,
 		cwd: options.cwd,
 		lease: options.lease,
+		band,
 	});
 
 	const { session } = await createAgentSession({
 		cwd: options.cwd,
 		model: options.model,
 		modelRuntime: options.modelRuntime,
+		// Band routing happens at entry (J-Space): quick/deep pin a thinking level;
+		// standard inherits the caller's.
+		...(BAND_THINKING[band] ? { thinkingLevel: BAND_THINKING[band] as never } : {}),
 		sessionManager: SessionManager.inMemory(),
 		resourceLoader: new MiniResourceLoader({ systemPrompt, handlers: [gate] }),
 		customTools: tools,
@@ -217,9 +319,25 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		ledgerDir: ledger.dir,
 		steps: budget.steps,
 		costUsd: budget.usd,
+		band,
+		control: {
+			journalUpdates: journal.updates,
+			verifiedEntries: journal.verified.length,
+			openItems: journal.open.length,
+			steers: { ...supervisor.counts },
+			checkpoints: checkpoints.count,
+			...(checkpoints.count > 0 ? { checkpointsDir: checkpoints.dir } : {}),
+			submitRejections,
+			...(gateOverridden ? { gateOverridden: true } : {}),
+			...(options.accept ? { acceptPassObserved: acceptPassStep >= 0 } : {}),
+		},
 		...(error ? { error } : {}),
 		...(changes.unverifiable ? { error: [error, `[lease] ${changes.unverifiable}`].filter(Boolean).join("; ") } : {}),
 	};
+
+	// The final journal state is an artifact the caller can read without the
+	// transcript: J-Space's ledger is the run's durable memory.
+	appendRecord(ledger.transcript, { type: "journal_final", journal: renderJournal(journal) });
 
 	appendRecord(ledger.transcript, { type: "result", result });
 	return result;

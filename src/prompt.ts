@@ -16,6 +16,7 @@
  */
 
 import type { BudgetLimits } from "./budget.ts";
+import type { Band } from "./runner.ts";
 
 export interface PromptInput {
 	limits: BudgetLimits;
@@ -24,10 +25,12 @@ export interface PromptInput {
 	cwd: string;
 	/** Write-set lease patterns, when the caller declared one. */
 	lease?: string[];
+	/** Behavior band; tunes the discipline wording. */
+	band?: Band;
 }
 
 export function buildSystemPrompt(input: PromptInput): string {
-	const { limits, hasLocate, cwd, lease } = input;
+	const { limits, hasLocate, cwd, lease, band } = input;
 	const lines = [
 		"You are a focused software engineering agent working in a real repository.",
 		"",
@@ -58,7 +61,34 @@ export function buildSystemPrompt(input: PromptInput): string {
 		"Always pass a `timeout` to `sh` for builds, test suites, and installs. A command that runs for",
 		"many minutes is nearly always a mistake, and it also invalidates prompt caching, which makes",
 		"the rest of the run considerably more expensive.",
+		"",
+		"## The journal (required)",
+		"",
+		"Keep your task state OUTSIDE your head with the `journal` tool: goal, core constraints,",
+		"verified claims (each naming the command output that proves it), open unknowns, and the ONE",
+		"next action. Write it early; rewrite it whenever verified grows or next changes. The harness",
+		"re-injects it when it goes stale, and `submit` is REJECTED while `verified` is empty — a",
+		"conclusion without an evidence bridge is not a result.",
 	];
+
+	if (band === "quick") {
+		lines.push(
+			"",
+			"## Band: quick",
+			"",
+			"This task was routed as short-horizon. Move directly: locate, act, verify, submit. If you",
+			"find yourself re-reading the same evidence, you already have enough — journal it and act.",
+		);
+	} else if (band === "deep") {
+		lines.push(
+			"",
+			"## Band: deep",
+			"",
+			"This task was routed as long-horizon. Analysis is expected — but every analysis phase must",
+			"end bound to the journal: what is now verified, what is open, what is the next action. A",
+			"checkpoint is snapshotted after every change, so prefer acting over re-deriving.",
+		);
+	}
 
 	if (lease && lease.length > 0) {
 		lines.push(

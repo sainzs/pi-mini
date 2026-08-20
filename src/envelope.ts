@@ -14,7 +14,23 @@
  */
 
 import type { BudgetSnapshot, ExitReason } from "./budget.ts";
+import type { Band } from "./runner.ts";
 import type { Verification } from "./verify.ts";
+
+/** J-Space control-plane outcomes for the run — steering and ledger telemetry. */
+export interface ControlReport {
+	journalUpdates: number;
+	verifiedEntries: number;
+	openItems: number;
+	steers: { repeat: number; inertia: number; journal: number };
+	checkpoints: number;
+	checkpointsDir?: string;
+	submitRejections: number;
+	/** True when the gate yielded after max rejections; the summary is unbridged. */
+	gateOverridden?: boolean;
+	/** Present when the caller declared an acceptance command. */
+	acceptPassObserved?: boolean;
+}
 
 /** ~8 KB, matching the parent-context budget in PLAN.md's acceptance criteria. */
 const MAX_SUMMARY_CHARS = 6_000;
@@ -37,10 +53,12 @@ export interface RunResult {
 	/** Observed paths no lease pattern licenses; non-empty fails the envelope. */
 	leaseViolations?: string[];
 	budget: BudgetSnapshot;
-	/** Directory holding the full transcript and elided observations. */
+	/** Directory holding the full transcript, journal and elided observations. */
 	ledgerDir: string;
 	steps: number;
 	costUsd: number;
+	band: Band;
+	control: ControlReport;
 	error?: string;
 }
 
@@ -70,7 +88,7 @@ export function formatEnvelope(result: RunResult): string {
 		`${(b.elapsedMs / 1000).toFixed(1)}s`,
 	].join(" · ");
 
-	const lines = [`status: ${result.exitReason}`, `spend: ${spend}`];
+	const lines = [`status: ${result.exitReason}`, `spend: ${spend}`, `band: ${result.band}`];
 
 	if (result.error) lines.push(`error: ${cap(result.error, 500)}`);
 
@@ -112,6 +130,20 @@ export function formatEnvelope(result: RunResult): string {
 				"the run wrote outside the paths it was licensed to touch.",
 		);
 	}
+
+	// The control report: how much steering the run needed. Per J-Space this is
+	// diagnostic data, not decoration — a run that needed repeated steering is
+	// telling you which side of the diode it fell into.
+	const c = result.control;
+	const steerTotal = c.steers.repeat + c.steers.inertia + c.steers.journal;
+	const controlBits = [
+		`journal: ${c.journalUpdates} update${c.journalUpdates === 1 ? "" : "s"} (${c.verifiedEntries} verified, ${c.openItems} open)`,
+		`steers: ${steerTotal}${steerTotal ? ` (repeat=${c.steers.repeat} inertia=${c.steers.inertia} journal=${c.steers.journal})` : ""}`,
+	];
+	if (c.checkpoints > 0 && c.checkpointsDir) controlBits.push(`checkpoints: ${c.checkpoints} (${c.checkpointsDir})`);
+	if (c.submitRejections > 0) controlBits.push(`submit rejected ${c.submitRejections}x${c.gateOverridden ? " then OVERRIDDEN — summary is unbridged" : ""}`);
+	if (c.acceptPassObserved === false) controlBits.push("acceptance pass NOT observed in-run");
+	lines.push(`control: ${controlBits.join(" · ")}`);
 
 	lines.push(`transcript: ${result.ledgerDir}`);
 

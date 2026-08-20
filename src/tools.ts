@@ -16,7 +16,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Budget } from "./budget.ts";
+import type { CheckpointRecorder } from "./checkpoints.ts";
 import { recordObservation, type RunLedger } from "./ledger.ts";
+import type { Supervisor } from "./supervisor.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +40,15 @@ export interface ShToolInput {
 	ledger: RunLedger;
 	/** Prefix applied to every command — used for output hygiene (PAGER=cat etc). */
 	commandPrefix?: string;
+	/** J-Space control plane: stall detection + steering nudges. */
+	supervisor?: Supervisor;
+	/** Diff snapshots after write-ish commands. */
+	checkpoints?: CheckpointRecorder;
+	/** Caller's acceptance command; an in-run pass is tracked for the submit gate. */
+	accept?: string;
+	onAcceptPass?: (step: number) => void;
+	/** Step of the last journal write, for staleness nudges. */
+	lastJournalStep?: () => number;
 }
 
 /**
@@ -59,7 +70,7 @@ export const SH_COMMAND_PREFIX = [
  * timeout, and ledger-backed elision.
  */
 export function createShTool(input: ShToolInput): ToolDefinition {
-	const { cwd, budget, ledger, commandPrefix } = input;
+	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, accept, onAcceptPass, lastJournalStep } = input;
 	const base = createBashToolDefinition(cwd, { commandPrefix, exposeSessionEnvironment: false });
 
 	return {
@@ -82,12 +93,32 @@ export function createShTool(input: ShToolInput): ToolDefinition {
 
 			const result = await base.execute(toolCallId, withTimeout as never, signal, onUpdate, ctx);
 
+			// The supervisor sees every command: stall signals, acceptance passes,
+			// and whether this step plausibly moved the work tree (→ checkpoint).
+			const writeish = supervisor?.noteCommand(params.command) ?? false;
+			const exitCode = (result.details as { exitCode?: number | null } | undefined)?.exitCode;
+			if (
+				accept &&
+				exitCode === 0 &&
+				params.command.replace(/\s+/g, " ").includes(accept.replace(/\s+/g, " ").trim())
+			) {
+				onAcceptPass?.(budget.steps);
+			}
+			if (writeish && checkpoints?.active) {
+				await checkpoints.maybeSnapshot(budget.steps);
+			}
+
 			// Route the text through the ledger, then append the budget nudge so the
 			// model can choose to submit rather than be cut off.
 			const content = (result.content ?? []).map((block) => {
 				if (block.type !== "text") return block;
 				return { ...block, text: recordObservation(ledger, budget.steps, block.text) };
 			});
+
+			// J-Space steering rides the tail of the observation the model is about
+			// to read: one cache-write increment, no extra turn.
+			const nudge = supervisor?.nudge(budget.steps, lastJournalStep?.() ?? -1);
+			if (nudge) content.push({ type: "text" as const, text: `\n${nudge.text}` });
 
 			const warning = budget.warningLine();
 			if (warning) content.push({ type: "text" as const, text: `\n${warning}` });
@@ -103,19 +134,35 @@ export interface SubmitDetails {
 }
 
 /**
+ * The submit-gate verdict. J-Space's bridge-before-conclusion: a run may not
+ * end until its claims are bridged to evidence — a journal with `Verified`
+ * entries, and an observed acceptance pass when the caller declared one.
+ */
+export interface SubmitGate {
+	(): { ok: true } | { ok: false; reason: string };
+}
+
+/**
  * `submit` — the explicit submission contract.
  *
  * mini-swe-agent's best idea. Scraping the last assistant message is
  * unreliable; a required terminating tool call makes the result machine-checkable
  * and lets the run end without paying for another LLM turn (`terminate: true`).
  */
-export function createSubmitTool(onSubmit: (details: SubmitDetails) => void): ToolDefinition {
+export function createSubmitTool(
+	onSubmit: (details: SubmitDetails) => void,
+	gate?: SubmitGate,
+	onRejected?: () => void,
+): ToolDefinition {
 	return defineTool({
 		name: "submit",
 		label: "submit",
 		description:
 			"Report your final result and end the run. Call this exactly once, as your last action. " +
-			"If you are out of budget, submit whatever you have verified so far rather than nothing.",
+			"The run must be bridged to evidence first: at least one journal `verified` entry, and — when " +
+			"an acceptance command was declared — an observed pass of it in this run. A rejected submit " +
+			"does not end the run; fix what it names and resubmit. If you are out of budget, submit " +
+			"whatever you have verified so far rather than nothing.",
 		promptSnippet: "Report the final result and end the run",
 		parameters: Type.Object({
 			summary: Type.String({
@@ -130,6 +177,23 @@ export function createSubmitTool(onSubmit: (details: SubmitDetails) => void): To
 			),
 		}),
 		async execute(_toolCallId, params) {
+			const verdict = gate?.() ?? { ok: true as const };
+			if (!verdict.ok) {
+				onRejected?.();
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`SUBMIT REJECTED — ${verdict.reason}\n` +
+								"Fix exactly that, then call submit again. This rejection does not consume your result; " +
+								"nothing has been reported to the caller yet.",
+						},
+					],
+					details: undefined,
+					isError: true,
+				};
+			}
 			const details: SubmitDetails = {
 				summary: params.summary,
 				filesChanged: params.filesChanged ?? [],

@@ -165,6 +165,15 @@ function result(overrides: Partial<RunResult> = {}): RunResult {
 		ledgerDir: "/tmp/x",
 		steps: 3,
 		costUsd: 0.12,
+		band: "standard",
+		control: {
+			journalUpdates: 1,
+			verifiedEntries: 1,
+			openItems: 0,
+			steers: { repeat: 0, inertia: 0, journal: 0 },
+			checkpoints: 0,
+			submitRejections: 0,
+		},
 		...overrides,
 	};
 }

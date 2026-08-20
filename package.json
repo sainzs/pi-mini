@@ -1,7 +1,7 @@
 {
   "name": "pi-mini-agent",
-  "version": "0.1.0",
-  "description": "A bounded mini-swe-agent-style task runtime any pi agent can summon as a dynamic workflow.",
+  "version": "0.3.0",
+  "description": "A bounded mini-swe-agent-style task runtime with a J-Space control plane (journal, submit gate, supervisor, checkpoints) any pi agent can summon as a dynamic workflow.",
   "license": "MIT",
   "type": "module",
   "files": [
