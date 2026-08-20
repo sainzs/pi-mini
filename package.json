@@ -22,6 +22,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+    "smoke": "node --experimental-strip-types scripts/smoke.ts",
+    "release-check": "node --experimental-strip-types scripts/release-check.ts"
   }
 }

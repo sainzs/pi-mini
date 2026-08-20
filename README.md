@@ -144,6 +144,9 @@ pi install /Users/ssainz/Code/pi-mini -l   # this project only
 
 Or load it for a single run: `pi -e ./src/index.ts`.
 
+Run `npm run release-check` for release evidence; paid smoke checks use `npm run release-check -- --live`.
+Version bumps require a fresh `findings/release-*` artifact.
+
 ## Why it is built this way
 
 Every claim below was measured on this machine against pi 0.83.0, not assumed.
