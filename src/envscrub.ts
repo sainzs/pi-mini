@@ -13,18 +13,22 @@
  * output "data, not instructions"), so a prompt-injected brief is one
  * `curl $AZURE_API_KEY` away from exfiltrating the parent's credentials.
  *
- * Policy: a small allowlist documents what a shell needs to function; a
- * case-insensitive name denylist is the security boundary; everything else
- * passes, because builds legitimately need odd variables and an allowlist
- * that captured all of them would be a second security boundary pretending
- * to be documentation. `NODE_OPTIONS` is dropped explicitly — it is not a
- * secret but a code-injection channel: `--import`/`-r` under it run
- * arbitrary modules inside any Node process the build happens to start.
+ * Policy: a case-insensitive name denylist is the security boundary and it
+ * wins outright; an allowlist documents (but never overrides) what a shell
+ * needs to function. Everything not on the denylist passes, because builds
+ * legitimately need odd variables and an allowlist that captured all of them
+ * would be a second security boundary pretending to be documentation.
+ * `NODE_OPTIONS` is dropped explicitly — it is not a secret but a
+ * code-injection channel: `--import`/`-r` under it run arbitrary modules
+ * inside any Node process the build happens to start. Token-like `HOMEBREW_*`
+ * names (e.g. `HOMEBREW_GITHUB_API_TOKEN`) are secrets too and are dropped:
+ * local toolchain capability is not worth shipping the parent's credentials
+ * to a semi-trusted brief's shell.
  */
 
 /**
  * Names the child shell genuinely needs, kept verbatim.
- * Documented intent, not the security boundary — see `SECRET_NAME`.
+ * Documented intent only — the denylist below always wins.
  */
 const ALLOWLIST = new Set([
 	"PATH",
@@ -77,13 +81,13 @@ export function scrubEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const out: NodeJS.ProcessEnv = {};
 	for (const name of Object.keys(env)) {
 		if (name === NODE_OPTIONS) continue;
-		// Allowlist wins: keep documented names even when they look secret-ish
-		// (e.g. HOMEBREW_GITHUB_API_TOKEN is a local toolchain capability).
+		// Denylist is the boundary and it wins outright — even over allowlisted
+		// names (PATH and HOME never match the denylist, so they survive).
+		if (SECRET_NAME.test(name)) continue;
 		if (ALLOWLIST.has(name) || name.startsWith(HOMEBREW_PREFIX)) {
 			out[name] = env[name];
 			continue;
 		}
-		if (SECRET_NAME.test(name)) continue;
 		out[name] = env[name];
 	}
 	return out;

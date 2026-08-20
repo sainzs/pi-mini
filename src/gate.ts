@@ -22,7 +22,9 @@
  * used as a denial-of-service against the parent.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { scrubEnv } from "./envscrub.ts";
 
 export type SubmitGateVerdict = { ok: true } | { ok: false; reason: string };
 
@@ -50,9 +52,10 @@ export interface SubmitGateOptions {
 const DEFAULT_MAX_ACCEPT_RUNS = 2;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL = 400;
+const execFileAsync = promisify(execFile);
 
 export function createSubmitGate(opts: SubmitGateOptions): {
-	gate: () => SubmitGateVerdict;
+	gate: SubmitGate;
 	state: SubmitGateState;
 } {
 	const maxAcceptRuns = opts.maxAcceptRuns ?? DEFAULT_MAX_ACCEPT_RUNS;
@@ -82,7 +85,7 @@ export function createSubmitGate(opts: SubmitGateOptions): {
 		return { ok: false, reason };
 	};
 
-	const gate = (): SubmitGateVerdict => {
+	const gate = async (): Promise<SubmitGateVerdict> => {
 		// Already yielded: do not burn another accept run, do not re-check.
 		if (rejections >= opts.maxRejections) {
 			gateOverridden = true;
@@ -101,14 +104,17 @@ export function createSubmitGate(opts: SubmitGateOptions): {
 				return reject("accept execution budget exhausted");
 			}
 			acceptRuns++;
-			const result = runAccept(opts.accept, opts.cwd, timeoutMs);
+			const result = await runAccept(opts.accept, opts.cwd, timeoutMs);
 			if (result.exitCode === 0) {
 				acceptObservedPass = true;
 				return { ok: true };
 			}
 			acceptObservedPass = false;
-			const tail = tailOf(result.output);
-			const detail = tail.length > 0 ? ` ${tail}` : "";
+			const details = [
+				result.timedOut ? `[accept timed out after ${timeoutMs}ms]` : "",
+				tailOf(result.output),
+			].filter(Boolean);
+			const detail = details.length > 0 ? ` ${details.join(" ")}` : "";
 			return reject(
 				`the acceptance command \`${opts.accept}\` exited ${result.exitCode ?? "none (did not run)"}.${detail}`,
 			);
@@ -136,44 +142,46 @@ function asText(value: unknown): string {
  * Execute the caller's accept command. Exit 0 is the only pass; every other
  * outcome (nonzero, timeout, spawn failure) is a reject with whatever output
  * we caught.
+ *
+ * Runs via `execFileAsync` (promisified `execFile`) with the event loop free;
+ * a hung command receives `SIGKILL` at the timeout deadline via `killSignal`.
+ * The run's child env is the scrubbed parent env (`scrubEnv(process.env)`) so
+ * the acceptance predicate cannot read the run's credentials either.
  */
-function runAccept(
+async function runAccept(
 	command: string,
 	cwd: string,
 	timeoutMs: number,
-): { exitCode: number | null; output: string } {
+): Promise<{ exitCode: number | null; output: string; timedOut: boolean }> {
 	try {
-		const stdout = execFileSync("sh", ["-c", command], {
+		const { stdout } = await execFileAsync("sh", ["-c", command], {
 			cwd,
+			env: scrubEnv(process.env),
 			timeout: timeoutMs,
 			encoding: "utf-8",
 			maxBuffer: 4 * 1024 * 1024,
-			stdio: ["ignore", "pipe", "pipe"],
+			killSignal: "SIGKILL",
 		});
-		return { exitCode: 0, output: stdout };
+		return { exitCode: 0, output: asText(stdout), timedOut: false };
 	} catch (cause) {
 		const error = cause as {
-			status?: number | null;
 			code?: string | number;
 			stdout?: string | Buffer;
 			stderr?: string | Buffer;
 			killed?: boolean;
-			signal?: NodeJS.Signals | number | null;
 		};
 		const stdout = asText(error.stdout);
 		const stderr = asText(error.stderr);
 		const combined = `${stdout}${stderr ? `${stdout ? "\n" : ""}${stderr}` : ""}`;
-		const timedOut =
-			error.killed === true ||
-			error.code === "ETIMEDOUT" ||
-			(error.status === null && error.signal != null);
+		const timedOut = error.killed === true || error.code === "ETIMEDOUT";
 		if (timedOut) {
 			return {
 				exitCode: null,
-				output: `[accept timed out after ${timeoutMs}ms] ${combined}`,
+				output: combined,
+				timedOut: true,
 			};
 		}
-		const exitCode = typeof error.status === "number" ? error.status : null;
-		return { exitCode, output: combined };
+		const exitCode = typeof error.code === "number" ? error.code : null;
+		return { exitCode, output: combined, timedOut: false };
 	}
 }

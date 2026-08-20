@@ -59,16 +59,21 @@ test("scrubEnv matches the denylist case-insensitively", () => {
 	assert.equal(out.safe_var, "ok");
 });
 
-test("scrubEnv lets the allowlist win over the denylist, HOMEBREW_* included", () => {
-	// HOMEBREW_GITHUB_API_TOKEN is credential-looking, yet the policy keeps any
-	// HOMEBREW_* name: brew's token is a capability for the local toolchain and
-	// "always keep" is the documented allowlist contract.
+test("scrubEnv: the denylist is the boundary and it wins over every name, HOMEBREW_* included", () => {
+	// HOMEBREW_GITHUB_API_TOKEN is credential-looking and is a real secret
+	// (a GitHub-scoped token for the local brew toolchain). The denylist wins
+	// outright: no allowlist carve-out rescues it.
 	const out = scrubEnv({
+		PATH: "/opt/homebrew/bin:/usr/bin",
+		HOME: "/Users/u",
 		HOMEBREW_GITHUB_API_TOKEN: "ghp_x",
 		HOMEBREW_NO_AUTO_UPDATE: "1",
 	});
-	assert.equal(out.HOMEBREW_GITHUB_API_TOKEN, "ghp_x");
-	assert.equal(out.HOMEBREW_NO_AUTO_UPDATE, "1");
+	// PATH and HOME are allowlisted and never match the denylist, so they survive.
+	assert.equal(out.PATH, "/opt/homebrew/bin:/usr/bin");
+	assert.equal(out.HOME, "/Users/u");
+	assert.equal(out.HOMEBREW_GITHUB_API_TOKEN, undefined, "denylist beats the allowlist and HOMEBREW_*");
+	assert.equal(out.HOMEBREW_NO_AUTO_UPDATE, "1", "non-secret HOMEBREW_* names still pass");
 });
 
 test("scrubEnv returns a fresh object and tolerates undefined values", () => {
