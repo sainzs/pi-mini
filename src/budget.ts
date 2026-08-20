@@ -27,6 +27,8 @@ export type ExitReason =
 	| "binding_error"
 	/** The provider throttled the run away (429/5xx streak); burned steps were refunded. */
 	| "throttled"
+	/** The context ceiling killed the run: one harder-elision retry spent, then terminal. */
+	| "context_overflow"
 	| "error";
 
 export interface BudgetLimits {

@@ -124,6 +124,11 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	let throttledRetries = 0;
 	let throttleStreak = 0;
 	let pendingBackoffMs = 0;
+	/**
+	 * Context-ceiling hits this run. The first triggers the harder-elision
+	 * recovery below; the second is terminal (`isTerminalOverflow`).
+	 */
+	let contextOverflows = 0;
 
 	/**
 	 * The submit gate — J-Space's bridge-before-conclusion and verifier coverage,
@@ -232,9 +237,9 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	sessionRef = session;
 
 	// Charge spend as it is observed, and keep a full local transcript. Provider
-	// failures (429 throttling, 5xx) end as assistant messages with an
-	// errorMessage rather than a thrown prompt — capture the last one, or a run
-	// killed by throttling reports only its lease warning as the "error".
+	// failures (429 throttling, 5xx, context overflow) end as assistant messages
+	// with an errorMessage rather than a thrown prompt — capture the last one, or
+	// a run killed by throttling reports only its lease warning as the "error".
 	// Observed 2026-08-20: four consecutive 429s on DeepSeek-V4-Flash-0731
 	// burned steps 4–7 and the envelope never mentioned the rate limit.
 	const unsubscribe = session.subscribe((event) => {
@@ -250,7 +255,8 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		}
 		if (message.role === "assistant" && message.stopReason === "error" && message.errorMessage) {
 			lastProviderError = message.errorMessage.slice(0, 300);
-			if (classifyProviderError(message.errorMessage) === "throttled") {
+			const errorClass = classifyProviderError(message.errorMessage);
+			if (errorClass === "throttled") {
 				// The step was pre-charged in the gate but the request did no work:
 				// hand it back, and pace the retry the session is about to make on
 				// its own. The wall clock is the backstop that bounds this loop —
@@ -262,6 +268,39 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 					type: "throttled",
 					retries: throttledRetries,
 					backoffMs: pendingBackoffMs,
+					error: lastProviderError,
+				});
+			} else if (errorClass === "context_overflow") {
+				// Context-ceiling recovery. The FIRST overflow earns one
+				// harder-elision retry instead of death:
+				//  (a) halve future observation retention — the full outputs are on
+				//      disk, so this costs cache-reads, not evidence;
+				//  (b) arm the seam's elision path (reused, not duplicated): the
+				//      next sh result carries the full journal re-broadcast, so
+				//      settled constraints survive the compaction the session is
+				//      about to perform;
+				//  (c) refund the pre-charged step — same rationale as throttling:
+				//      no work happened.
+				// pi's session does the retry itself (one compact-and-retry via
+				// `_checkCompaction`, then it settles), so the SECOND overflow
+				// needs no action here: the run ends and the exit mapping below
+				// names it "context_overflow".
+				contextOverflows++;
+				if (contextOverflows === 1) {
+					ledger.tightenObservationCaps();
+					seam.tail({
+						state: journal,
+						step: budget.steps,
+						digestEvery: 0,
+						journalNudge: true,
+						elidedThisStep: true,
+					});
+					budget.refundStep();
+				}
+				appendRecord(ledger.transcript, {
+					type: "context_overflow",
+					count: contextOverflows,
+					capsHalved: contextOverflows === 1,
 					error: lastProviderError,
 				});
 			}
@@ -329,6 +368,20 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		exitReason = "throttled";
 	}
 
+	// A run killed by the context ceiling must say so. The first overflow was
+	// absorbed (caps halved, journal re-broadcast armed, step refunded); the
+	// second means the session's one compact-and-retry is spent, so the run
+	// stops as "context_overflow" rather than a generic "error". Same exclusion
+	// order as throttling: user intent and a dead binding are never the ceiling.
+	if (
+		!submitted &&
+		exitReason !== "aborted" &&
+		exitReason !== "binding_error" &&
+		isTerminalOverflow(contextOverflows, lastProviderError)
+	) {
+		exitReason = "context_overflow";
+	}
+
 	// Observation before testimony: what actually changed on disk.
 	const changes = await observeChanges(options.cwd, leaseBaseline);
 	const claimed = submitted?.filesChanged ?? [];
@@ -367,6 +420,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			...(checkpoints.count > 0 ? { checkpointsDir: checkpoints.dir } : {}),
 			submitRejections: gateState.rejections,
 			throttledRetries,
+			...(contextOverflows > 0 ? { contextOverflows } : {}),
 			...(gateState.gateOverridden ? { gateOverridden: true } : {}),
 			...(options.accept ? { acceptPassObserved: gateState.acceptObservedPass } : {}),
 		},
@@ -396,18 +450,53 @@ const BINDING_ERROR_RX =
 export const RETRYABLE_RX =
 	/\b429\b|rate.?limit|\b50[0-9]\b|overloaded|econnreset|etimedout|socket hang up/i;
 
+/**
+ * Signatures of a prompt that exceeded the model's context window. A subset of
+ * pi-ai's OVERFLOW_PATTERNS (`src/utils/overflow.ts`) covering the shapes we
+ * can act on. Deliberately NOT in RETRYABLE_RX: pacing and resending the same
+ * oversized payload would just re-hit the same wall — the recovery is a
+ * smaller request, not a later one. Known regex tradeoff, shared with pi-ai's
+ * own NON_OVERFLOW guard: Bedrock's throttling text "Too many tokens, please
+ * wait ..." matches /too many tokens/i and reads as overflow; pi still treats
+ * that message as auto-retryable, so the run gets its retry either way.
+ */
+export const CONTEXT_OVERFLOW_RX =
+	/context.{0,20}(length|window|limit)|maximum context|too many tokens|prompt is too long|input is too long/i;
+
 /** What a provider error message means for the run's budget and pacing. */
-export type ProviderErrorClass = "throttled" | "binding" | "fatal";
+export type ProviderErrorClass = "throttled" | "binding" | "context_overflow" | "fatal";
 
 /**
  * Classify a provider error string. Binding is checked first: refunding steps
  * for an auth failure would let the session's auto-continue loop spin forever
  * without spending anything, so a dead binding must never read as retryable.
+ * Overflow is checked before throttle: a too-large request that happens to
+ * carry a 429 shape is the ceiling, not rate limiting.
  */
 export function classifyProviderError(errorMessage: string): ProviderErrorClass {
 	if (BINDING_ERROR_RX.test(errorMessage)) return "binding";
+	if (CONTEXT_OVERFLOW_RX.test(errorMessage)) return "context_overflow";
 	if (RETRYABLE_RX.test(errorMessage)) return "throttled";
 	return "fatal";
+}
+
+/**
+ * Is this overflow streak terminal? The FIRST overflow in a run earns the
+ * harder-elision retry (caps halved, journal re-broadcast armed, step
+ * refunded; pi's session then compact-and-retries on its own — the overflow
+ * branch of `_checkCompaction` in agent-session.js). The SECOND means that
+ * recovery is spent. Guarded by the last error's class so a run that recovered
+ * and later died of something else is not mislabeled.
+ */
+export function isTerminalOverflow(
+	overflows: number,
+	lastProviderError: string | undefined,
+): boolean {
+	return (
+		overflows >= 2 &&
+		lastProviderError !== undefined &&
+		classifyProviderError(lastProviderError) === "context_overflow"
+	);
 }
 
 /**

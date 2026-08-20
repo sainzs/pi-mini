@@ -24,19 +24,54 @@ import { join } from "node:path";
 /** Head + tail budget for an observation kept in context. */
 const HEAD_CHARS = 2_500;
 const TAIL_CHARS = 1_500;
-const ELIDE_THRESHOLD = HEAD_CHARS + TAIL_CHARS;
+
+/**
+ * Retention floor under tightening. Below this the in-context digest stops
+ * being usable evidence and the on-disk path is the only readable form.
+ * Tightening fires at most once per run (the second context overflow is
+ * terminal — see runner.ts), so the floor is a backstop, not a live concern.
+ */
+const MIN_HEAD_CHARS = 500;
+const MIN_TAIL_CHARS = 300;
 
 export interface RunLedger {
 	runId: string;
 	dir: string;
 	/** Absolute path of the NDJSON transcript for this run. */
 	transcript: string;
+	/**
+	 * Current per-observation retention: chars kept in context, head + tail.
+	 * Starts at HEAD_CHARS/TAIL_CHARS; `tightenObservationCaps` halves it.
+	 */
+	readonly observationCaps: { readonly head: number; readonly tail: number };
+	/**
+	 * Halve the retention for all FUTURE observations, floored at MIN_*_CHARS.
+	 *
+	 * The context-ceiling recovery lever: after an overflow the session retries
+	 * on a compacted transcript, so shrinking future digests is what keeps the
+	 * retry under the ceiling. Digests already in the transcript are history;
+	 * nothing rewrites them.
+	 */
+	tightenObservationCaps(): void;
 }
 
 export function createLedger(baseDir: string, runId: string): RunLedger {
 	const dir = join(baseDir, "runs", runId);
 	mkdirSync(join(dir, "obs"), { recursive: true });
-	return { runId, dir, transcript: join(dir, "transcript.ndjson") };
+	let head = HEAD_CHARS;
+	let tail = TAIL_CHARS;
+	return {
+		runId,
+		dir,
+		transcript: join(dir, "transcript.ndjson"),
+		get observationCaps() {
+			return { head, tail };
+		},
+		tightenObservationCaps() {
+			head = Math.max(MIN_HEAD_CHARS, Math.floor(head / 2));
+			tail = Math.max(MIN_TAIL_CHARS, Math.floor(tail / 2));
+		},
+	};
 }
 
 /**
@@ -46,7 +81,9 @@ export function createLedger(baseDir: string, runId: string): RunLedger {
  * to read, which is what makes it actionable rather than merely honest.
  */
 export function recordObservation(ledger: RunLedger, step: number, raw: string): string {
-	if (raw.length <= ELIDE_THRESHOLD) return raw;
+	const { head, tail } = ledger.observationCaps;
+	const threshold = head + tail;
+	if (raw.length <= threshold) return raw;
 
 	const path = join(ledger.dir, "obs", `${String(step).padStart(3, "0")}.txt`);
 	try {
@@ -54,20 +91,20 @@ export function recordObservation(ledger: RunLedger, step: number, raw: string):
 	} catch {
 		// A ledger write failure must never fail the step; fall back to a plain
 		// truncation with no file reference.
-		const droppedNoFile = raw.length - ELIDE_THRESHOLD;
+		const droppedNoFile = raw.length - threshold;
 		return [
-			raw.slice(0, HEAD_CHARS),
+			raw.slice(0, head),
 			`\n\n<elided_chars>${droppedNoFile} characters elided; full output unavailable</elided_chars>\n\n`,
-			raw.slice(-TAIL_CHARS),
+			raw.slice(-tail),
 		].join("");
 	}
 
-	const dropped = raw.length - ELIDE_THRESHOLD;
+	const dropped = raw.length - threshold;
 	return [
-		raw.slice(0, HEAD_CHARS),
+		raw.slice(0, head),
 		`\n\n<elided_chars>${dropped} characters elided. Full ${raw.length}-char output: ${path}`,
 		` — re-read with \`sed -n 'START,ENDp' ${path}\` or \`rg PATTERN ${path}\`</elided_chars>\n\n`,
-		raw.slice(-TAIL_CHARS),
+		raw.slice(-tail),
 	].join("");
 }
 
