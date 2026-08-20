@@ -1,4 +1,4 @@
-# pi-mini-agent — plan
+# pi-mini — plan
 
 A mini-swe-agent-inspired **bounded task runtime**, exposed as a Pi tool that any
 agent (top-level or nested) can summon on demand as a dynamic workflow.

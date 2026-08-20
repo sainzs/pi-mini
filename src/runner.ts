@@ -178,7 +178,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 				stopReason ??= stop;
 				appendRecord(ledger.transcript, { type: "budget_stop", reason: stop, ...budget.snapshot() });
 				void sessionRef?.abort();
-				throw new Error(`mini-agent budget stop: ${stop}`);
+				throw new Error(`pi-mini budget stop: ${stop}`);
 			}
 			budget.countStep();
 			options.onProgress?.(`step ${budget.steps}/${budget.limits.steps} · $${budget.usd.toFixed(3)}`);

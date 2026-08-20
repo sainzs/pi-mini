@@ -1,5 +1,5 @@
 /**
- * pi-mini-agent — a bounded task runtime any agent can summon.
+ * pi-mini — a bounded task runtime any agent can summon.
  *
  * Registers one tool, `mini`. Give it a brief and a budget; it runs a
  * mini-swe-agent-style loop (one shell action per step, explicit submission) in a
@@ -37,7 +37,7 @@ const MAX_CONCURRENCY = Number(process.env.PI_MINI_CONCURRENCY ?? 2);
 /** Ceiling shared by every run summoned from this process. */
 const TREE_CEILING_USD = Number(process.env.PI_MINI_TREE_USD ?? 25);
 
-const BASE_DIR = join(homedir(), ".pi", "agent", "mini-agent");
+const BASE_DIR = join(homedir(), ".pi", "agent", "mini");
 
 /**
  * The default summoned-run model. DeepSeek-V4-Flash-0731 is deliberate: it is

@@ -1,5 +1,5 @@
 {
-  "name": "pi-mini-agent",
+  "name": "pi-mini",
   "version": "0.3.0",
   "description": "A bounded mini-swe-agent-style task runtime with a J-Space control plane (journal, submit gate, supervisor, checkpoints) any pi agent can summon as a dynamic workflow.",
   "license": "MIT",

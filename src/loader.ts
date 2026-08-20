@@ -82,7 +82,7 @@ export class MiniResourceLoader implements ResourceLoader {
 		this.systemPrompt = input.systemPrompt;
 		const runtime: ExtensionRuntime = createExtensionRuntime();
 		this.extensionsResult = {
-			extensions: input.handlers.length ? [inlineExtension("<mini-agent:budget>", input.handlers)] : [],
+			extensions: input.handlers.length ? [inlineExtension("<pi-mini:budget>", input.handlers)] : [],
 			errors: [],
 			runtime,
 		};

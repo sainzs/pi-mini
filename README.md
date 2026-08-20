@@ -1,4 +1,4 @@
-# pi-mini-agent
+# pi-mini
 
 A bounded, mini-swe-agent-style task runtime that **any pi agent can summon on
 demand** as a dynamic workflow.
@@ -22,7 +22,7 @@ mini(
 status: submitted
 spend: 14/25 steps · $0.4120/$1.50 · 96.4s
 files touched: src/http/retry.ts
-transcript: ~/.pi/agent/mini-agent/runs/3f9c1a02
+transcript: ~/.pi/agent/mini/runs/3f9c1a02
 
 <subagent_result>
 ...
@@ -138,8 +138,8 @@ $0.00 and never trips.
 ## Install
 
 ```bash
-pi install /Users/ssainz/Code/pi-mini-agent      # global
-pi install /Users/ssainz/Code/pi-mini-agent -l   # this project only
+pi install /Users/ssainz/Code/pi-mini      # global
+pi install /Users/ssainz/Code/pi-mini -l   # this project only
 ```
 
 Or load it for a single run: `pi -e ./src/index.ts`.
@@ -300,7 +300,7 @@ the brief, no parent-LLM turn required:
 
 Flags are optional; bare `/mini <task>` is a standard-band run. Progress and
 the final verdict arrive as notifications; the full envelope lands in
-`~/.pi/agent/mini-agent/runs/<id>/envelope.md` and the audit row is tagged
+`~/.pi/agent/mini/runs/<id>/envelope.md` and the audit row is tagged
 `surface: "tty"`.
 
 Environment: `PI_MINI_MAX_DEPTH` (1), `PI_MINI_CONCURRENCY` (2),
