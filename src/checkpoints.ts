@@ -8,12 +8,16 @@
  * fingerprint moved, snapshot `git diff HEAD` to `checkpoints/NNN.patch`.
  *
  * Recovery is then a one-liner for the caller: `git apply -R <patch>` rolls
- * back to any recorded intermediate; the index also lists untracked files each
- * snapshot knew about (their content is not in the diff — noted honestly).
+ * back to any recorded intermediate. Untracked files are intent-to-add'd ahead
+ * of the diff so brand-new files land IN the patch — a rollback removes them
+ * too — then the index reset leaves their untracked status untouched. Above
+ * 200 untracked paths the recorder falls back to listing them as
+ * `untrackedSkipped` and leaving them out of the patch (noted honestly).
  *
  * Cost discipline: snapshots only run after commands the supervisor classifies
- * as write-ish, each is one `git status` plus (on change) one `git diff` —
- * tens of milliseconds, never on the model's critical path. Patches are
+ * as write-ish, each is one `git status` plus (on change) one `git diff` and
+ * one `git ls-files` — tens of milliseconds, never on the model's critical
+ * path — plus a paired add/reset only when untracked files exist. Patches are
  * size-capped and count-capped; a run cannot fill a disk by flailing.
  */
 
@@ -24,6 +28,8 @@ import { fingerprint, git, porcelainPaths } from "./lease.ts";
 
 const MAX_PATCH_BYTES = 256 * 1024;
 const MAX_CHECKPOINTS = 40;
+/** Intent-to-add cap: a huge untracked set would balloon the patch and the reset. */
+const MAX_INTENT_TO_ADD_PATHS = 200;
 
 export class CheckpointRecorder {
 	private readonly cwd: string;
@@ -76,23 +82,57 @@ export class CheckpointRecorder {
 				}
 			}
 
-			const diff = await git(this.cwd, ["diff", "HEAD", "--binary"]);
-			const seqLabel = String(this.seq).padStart(3, "0");
-			let patchFile: string | undefined;
-			let note: string | undefined;
-			if (diff.length > 0 && Buffer.byteLength(diff) <= MAX_PATCH_BYTES) {
-				patchFile = join(this.dir, `${seqLabel}.patch`);
-				writeFileSync(patchFile, diff, "utf-8");
-			} else if (diff.length > 0) {
-				note = `diff ${Buffer.byteLength(diff)} bytes exceeds ${MAX_PATCH_BYTES}-byte cap; paths recorded, patch skipped`;
-			}
-
-			// Untracked paths are not in `git diff HEAD`; list them so the caller
-			// knows what a rollback would NOT remove.
+			// Untracked paths are absent from `git diff HEAD` by default.
+			// Intent-to-add them (empty index blob) so brand-new files land IN the
+			// patch and a rollback removes them; capped because a giant untracked
+			// set (build output, vendored trees) would balloon the patch and the
+			// reset. The reset below restores their untracked status.
 			const tracked = new Set(
 				await git(this.cwd, ["ls-files"]).then((s) => s.split("\n").filter(Boolean)),
 			);
 			const untracked = paths.filter((p) => !tracked.has(p));
+
+			let intents: string[] = [];
+			let untrackedSkipped: string[] = [];
+			let note: string | undefined;
+			if (untracked.length > MAX_INTENT_TO_ADD_PATHS) {
+				untrackedSkipped = untracked;
+				note = `${untracked.length} untracked files exceed the ${MAX_INTENT_TO_ADD_PATHS}-path intent-to-add cap; patch excludes them`;
+			} else if (untracked.length > 0) {
+				try {
+					await git(this.cwd, ["add", "--intent-to-add", "--", ...untracked]);
+					intents = untracked;
+				} catch {
+					// Fall back to the old exclusion behavior, recorded honestly.
+					untrackedSkipped = untracked;
+					note = "git add --intent-to-add failed; patch excludes untracked files";
+				}
+			}
+
+			let diff: string;
+			try {
+				diff = await git(this.cwd, ["diff", "HEAD", "--binary"]);
+			} finally {
+				if (intents.length > 0) {
+					try {
+						await git(this.cwd, ["reset", "-q", "--", ...intents]);
+					} catch {
+						// Restoring untracked status is best-effort and must never
+						// throw; a stuck intent-to-add entry shows in the next status.
+					}
+				}
+			}
+
+			const seqLabel = String(this.seq).padStart(3, "0");
+			let patchFile: string | undefined;
+			if (diff.length > 0 && Buffer.byteLength(diff) <= MAX_PATCH_BYTES) {
+				patchFile = join(this.dir, `${seqLabel}.patch`);
+				writeFileSync(patchFile, diff, "utf-8");
+			} else if (diff.length > 0) {
+				note = [note, `diff ${Buffer.byteLength(diff)} bytes exceeds ${MAX_PATCH_BYTES}-byte cap; paths recorded, patch skipped`]
+					.filter(Boolean)
+					.join("; ");
+			}
 
 			this.latestPaths = paths;
 			appendRecord(join(this.dir, "index.ndjson"), {
@@ -100,7 +140,8 @@ export class CheckpointRecorder {
 				step,
 				paths,
 				...(patchFile ? { patch: patchFile } : {}),
-				...(untracked.length ? { untrackedNotPatched: untracked } : {}),
+				...(intents.length ? { untrackedPatched: intents } : {}),
+				...(untrackedSkipped.length ? { untrackedSkipped } : {}),
 				...(note ? { note } : {}),
 			});
 			this.seq++;

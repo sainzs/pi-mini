@@ -224,7 +224,7 @@ test("checkpoint fires on observed change and stays silent on a clean tree", asy
 	assert.equal(readFileSync(join(dir, "a.txt"), "utf-8"), "one\n");
 });
 
-test("untracked files are indexed but honestly excluded from the patch", async () => {
+test("untracked files are patched via intent-to-add and stay untracked", async () => {
 	const dir = gitRepo();
 	const runDir = mkdtempSync(join(tmpdir(), "mini-ckpt-run-"));
 	const rec = new CheckpointRecorder(dir, runDir, dir);
@@ -233,8 +233,9 @@ test("untracked files are indexed but honestly excluded from the patch", async (
 	await rec.maybeSnapshot(1);
 	assert.equal(rec.count, 1);
 	const index = readFileSync(join(runDir, "checkpoints", "index.ndjson"), "utf-8");
-	assert.match(index, /untrackedNotPatched/);
+	assert.match(index, /untrackedPatched/);
 	assert.match(index, /new\.txt/);
+	assert.ok(!index.includes("untrackedNotPatched"), "new files must be in the patch, not excluded");
 });
 
 test("a non-git cwd makes the recorder inert", async () => {
