@@ -17,6 +17,7 @@ import {
 import { Type } from "typebox";
 import type { Budget } from "./budget.ts";
 import type { CheckpointRecorder } from "./checkpoints.ts";
+import { scrubEnv } from "./envscrub.ts";
 import type { SubmitGate } from "./gate.ts";
 import { recordObservation, type RunLedger } from "./ledger.ts";
 import type { Supervisor } from "./supervisor.ts";
@@ -66,12 +67,19 @@ export const SH_COMMAND_PREFIX = [
  *
  * Wrapping rather than reimplementing keeps detached process groups, tree kill
  * on abort, output truncation and temp-file spill (`src/core/tools/bash.ts`) —
- * all of which are already correct. We add exactly two things: a mandatory
- * timeout, and ledger-backed elision.
+ * all of which are already correct. We add three things: a mandatory timeout,
+ * ledger-backed elision, and env scrubbing — the child shell must not see the
+ * parent's credentials (threat and policy in `envscrub.ts`).
  */
 export function createShTool(input: ShToolInput): ToolDefinition {
 	const { cwd, budget, ledger, commandPrefix, supervisor, checkpoints, lastJournalStep } = input;
-	const base = createBashToolDefinition(cwd, { commandPrefix, exposeSessionEnvironment: false });
+	const base = createBashToolDefinition(cwd, {
+		commandPrefix,
+		exposeSessionEnvironment: false,
+		// Replace the child's environment outright: `resolveSpawnContext`
+		// would otherwise spread the full parent env into every command.
+		spawnHook: (context) => ({ ...context, env: scrubEnv(context.env) }),
+	});
 
 	return {
 		...base,
