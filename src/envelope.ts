@@ -26,6 +26,8 @@ export interface ControlReport {
 	checkpoints: number;
 	checkpointsDir?: string;
 	submitRejections: number;
+	/** Provider throttles absorbed (the burned steps were refunded and paced). */
+	throttledRetries: number;
 	/** True when the gate yielded after max rejections; the summary is unbridged. */
 	gateOverridden?: boolean;
 	/** Present when the caller declared an acceptance command. */
@@ -145,6 +147,7 @@ export function formatEnvelope(result: RunResult): string {
 	];
 	if (c.checkpoints > 0 && c.checkpointsDir) controlBits.push(`checkpoints: ${c.checkpoints} (${c.checkpointsDir})`);
 	if (c.submitRejections > 0) controlBits.push(`submit rejected ${c.submitRejections}x${c.gateOverridden ? " then OVERRIDDEN — summary is unbridged" : ""}`);
+	if (c.throttledRetries > 0) controlBits.push(`throttled ${c.throttledRetries}x (steps refunded)`);
 	if (c.acceptPassObserved === false) controlBits.push("acceptance pass NOT observed in-run");
 	lines.push(`control: ${controlBits.join(" · ")}`);
 

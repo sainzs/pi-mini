@@ -113,6 +113,18 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	let stopReason: ExitReason | undefined;
 
 	/**
+	 * Throttle bookkeeping, shared by the subscribe handler (which sees the
+	 * 429/5xx arrive) and the gate (which paces the retry before the next
+	 * request). `throttledRetries` is the run total reported in the envelope;
+	 * `throttleStreak` is the consecutive count that drives the backoff
+	 * exponent and resets on any successful assistant message.
+	 */
+	let lastProviderError: string | undefined;
+	let throttledRetries = 0;
+	let throttleStreak = 0;
+	let pendingBackoffMs = 0;
+
+	/**
 	 * The submit gate — J-Space's bridge-before-conclusion and verifier coverage,
 	 * moved from discipline into the harness. Acceptance is executed HERE, not
 	 * inferred from the child's `sh` command text (see `gate.ts`).
@@ -136,10 +148,25 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	 * We both abort the session and throw: the abort stops the loop, and the
 	 * throw stops *this* request even if the runner swallows handler errors.
 	 * Worst case the overrun is bounded to a single request.
+	 *
+	 * The handler is async on purpose: the extension runner awaits it
+	 * (`await handler(event, ctx)` in core/extensions/runner.js), so a sleep
+	 * here genuinely delays the HTTP call. That is where throttle backoff
+	 * lands — the subscribe handler cannot pause the session's own retry loop.
 	 */
 	const gate = {
 		event: "before_provider_request",
-		handler: () => {
+		handler: async () => {
+			// Pace the retry a throttled reply earned. Skipped when the remaining
+			// wall budget is shorter than the delay: better to trip wall_limit
+			// honestly than to sleep through the deadline and report a nap.
+			if (pendingBackoffMs > 0) {
+				const delay = pendingBackoffMs;
+				pendingBackoffMs = 0;
+				if (budget.limits.wallMs - budget.elapsedMs >= delay) {
+					await new Promise((resolve) => setTimeout(resolve, delay));
+				}
+			}
 			const stop = budget.checkBeforeCall();
 			if (stop) {
 				stopReason ??= stop;
@@ -207,7 +234,6 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	// killed by throttling reports only its lease warning as the "error".
 	// Observed 2026-08-20: four consecutive 429s on DeepSeek-V4-Flash-0731
 	// burned steps 4–7 and the envelope never mentioned the rate limit.
-	let lastProviderError: string | undefined;
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type !== "message_end") return;
 		const message = event.message as {
@@ -221,6 +247,24 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		}
 		if (message.role === "assistant" && message.stopReason === "error" && message.errorMessage) {
 			lastProviderError = message.errorMessage.slice(0, 300);
+			if (classifyProviderError(message.errorMessage) === "throttled") {
+				// The step was pre-charged in the gate but the request did no work:
+				// hand it back, and pace the retry the session is about to make on
+				// its own. The wall clock is the backstop that bounds this loop —
+				// near the deadline the gate skips the sleep and wall_limit trips.
+				budget.refundStep();
+				throttledRetries++;
+				pendingBackoffMs = backoffDelayMs(throttleStreak++);
+				appendRecord(ledger.transcript, {
+					type: "throttled",
+					retries: throttledRetries,
+					backoffMs: pendingBackoffMs,
+					error: lastProviderError,
+				});
+			}
+		} else if (message.role === "assistant") {
+			// A successful reply ends the throttle streak; the run total stands.
+			throttleStreak = 0;
 		}
 		appendRecord(ledger.transcript, { type: "message", message: event.message });
 	});
@@ -263,8 +307,23 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	// worse, in harnesses without a submission contract, as silent success.
 	// Observed 2026-08-07: a whole dispatch wave "completed" against a disabled
 	// provider having done zero work.
-	if (exitReason === "error" && error && budget.steps <= 1 && BINDING_ERROR_RX.test(error)) {
+	if (exitReason === "error" && error && budget.steps <= 1 && classifyProviderError(error) === "binding") {
 		exitReason = "binding_error";
+	}
+
+	// A run killed by throttling must say so. With the burned steps refunded,
+	// "throttled" names the actual cause — the provider, not the work — where
+	// the observed 2026-08-20 failure surfaced as a generic "error" after four
+	// 429s. "aborted" and "binding_error" outrank it: user intent and a dead
+	// binding are never throttling, whatever the last error text matched.
+	if (
+		!submitted &&
+		exitReason !== "aborted" &&
+		exitReason !== "binding_error" &&
+		lastProviderError &&
+		classifyProviderError(lastProviderError) === "throttled"
+	) {
+		exitReason = "throttled";
 	}
 
 	// Observation before testimony: what actually changed on disk.
@@ -304,6 +363,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 			checkpoints: checkpoints.count,
 			...(checkpoints.count > 0 ? { checkpointsDir: checkpoints.dir } : {}),
 			submitRejections: gateState.rejections,
+			throttledRetries,
 			...(gateState.gateOverridden ? { gateOverridden: true } : {}),
 			...(options.accept ? { acceptPassObserved: gateState.acceptObservedPass } : {}),
 		},
@@ -322,6 +382,39 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 /** Signatures of a dead/misconfigured model binding on the first call. */
 const BINDING_ERROR_RX =
 	/\b401\b|\b403\b|unauthorized|forbidden|api key|apikey|model is disabled|no provider|model not found|missing.*base.?url|invalid.*credential/i;
+
+/**
+ * Signatures of a provider error worth retrying: throttling and transient
+ * transport failure. The 429 shape is verbatim from the observed failure
+ * (azure-foundry/DeepSeek-V4-Flash-0731, eastus2, 2026-08-20):
+ * `429: {"code":"RateLimitReached","message":"..."}`. Auth errors are
+ * deliberately absent — a 401 must stay a binding error, never a retry.
+ */
+export const RETRYABLE_RX =
+	/\b429\b|rate.?limit|\b50[0-9]\b|overloaded|econnreset|etimedout|socket hang up/i;
+
+/** What a provider error message means for the run's budget and pacing. */
+export type ProviderErrorClass = "throttled" | "binding" | "fatal";
+
+/**
+ * Classify a provider error string. Binding is checked first: refunding steps
+ * for an auth failure would let the session's auto-continue loop spin forever
+ * without spending anything, so a dead binding must never read as retryable.
+ */
+export function classifyProviderError(errorMessage: string): ProviderErrorClass {
+	if (BINDING_ERROR_RX.test(errorMessage)) return "binding";
+	if (RETRYABLE_RX.test(errorMessage)) return "throttled";
+	return "fatal";
+}
+
+/**
+ * Exponential backoff with jitter, capped at 30 s — the delay before the next
+ * provider request after a throttled reply. `jitterMs` is injectable so the
+ * formula is directly testable; in a run it is uniform in [0, 500).
+ */
+export function backoffDelayMs(attempt: number, jitterMs = Math.random() * 500): number {
+	return Math.min(1000 * 2 ** attempt + jitterMs, 30_000);
+}
 
 /**
  * When a run ends without submitting, salvage the last assistant text.

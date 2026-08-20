@@ -173,6 +173,7 @@ function result(overrides: Partial<RunResult> = {}): RunResult {
 			steers: { repeat: 0, inertia: 0, journal: 0 },
 			checkpoints: 0,
 			submitRejections: 0,
+			throttledRetries: 0,
 		},
 		...overrides,
 	};

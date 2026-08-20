@@ -25,6 +25,8 @@ export type ExitReason =
 	| "aborted"
 	/** The model binding itself is dead (auth/config failure on the first call). */
 	| "binding_error"
+	/** The provider throttled the run away (429/5xx streak); burned steps were refunded. */
+	| "throttled"
 	| "error";
 
 export interface BudgetLimits {
@@ -122,6 +124,21 @@ export class Budget {
 	/** Count a model call that is about to be made. */
 	countStep(): void {
 		this.steps++;
+	}
+
+	/**
+	 * Hand back a pre-charged step that did no work.
+	 *
+	 * Steps are charged in `before_provider_request`, ahead of the HTTP call,
+	 * so a throttled request would otherwise consume budget it never spent.
+	 * Observed 2026-08-20 on azure-foundry/DeepSeek-V4-Flash-0731 (eastus2):
+	 * four consecutive 429s burned steps 4–7 of a run that did nothing — and on
+	 * a zero-priced deployment steps are the only budget there is. Floored at
+	 * 0; USD and the tree ceiling are untouched, because a rejected request
+	 * cost no money — only a dishonestly counted step.
+	 */
+	refundStep(): void {
+		this.steps = Math.max(0, this.steps - 1);
 	}
 
 	/** Charge observed spend to this run and to the shared tree ceiling. */
