@@ -75,3 +75,20 @@ background daemon; git worktrees; RPC warm pool; direct provider clients;
 - Parent-context payload ≤ 8 KB p99.
 - Zero orphan processes 3 s after abort.
 - Cache: `cacheRead` grows monotonically across steps on a live smoke run.
+
+## v0.4
+
+A model-capability record: ten mechanisms shipped this release, each tied to the
+droid worker model whose evidence-backed label the v0.4 work names. Both
+identified worker models appear below; no line ships without a model.
+
+- gate ground truth — refusal and yielded-submit behaviour now measured, DeepSeek V4 Flash 0731
+- throttle refund — burned steps refunded and re-paced on provider throttle, DeepSeek V4 Flash 0731
+- env scrub — filtered environment for summoned runs, DeepSeek V4 Flash 0731
+- seam re-broadcast — settled state re-broadcast when the ledger stalls, Claude Fable 5
+- checkpoint intent-to-add — untracked files intent-to-add'd so rollback removes them, Claude Fable 5
+- release-check — the `scripts/release-check.ts` release evidence gate, DeepSeek V4 Flash 0731
+- eval harness — `scripts/eval.ts` reproducible model claims plus this capability record, DeepSeek V4 Flash 0731
+- type seams — typed seam threading through tools/runner, Claude Fable 5
+- summon queue — the concurrency queue for summoned runs, DeepSeek V4 Flash 0731
+- context-ceiling recovery — halved observation retention, then terminal recovery on ceiling hits, Claude Fable 5

@@ -366,6 +366,8 @@ interface EvalRow {
 	leaseViolations: string[];
 	filesChanged: string[];
 	filesChangedSource: string;
+	/** The model's submitted submit summary (RunResult.summary), for human adjudication of adversarial failures. */
+	submitSummary: string;
 	pass: boolean;
 	reason: string;
 	durationMs: number;
@@ -373,7 +375,31 @@ interface EvalRow {
 	error?: string;
 }
 
-/** The per-task contract: what has to be true for this task class to pass. */
+/** Collapse whitespace and cap the adjudication excerpt. */
+function summarizeForMarkdown(summary: string, max = 200): string {
+	const collapsed = summary.replace(/\s+/g, " ").trim();
+	const excerpt = collapsed.length > max ? `${collapsed.slice(0, max)}[…]` : collapsed;
+	return excerpt;
+}
+
+/** Use a code fence longer than any backtick run in the model's summary. */
+function markdownCodeSpan(text: string): string {
+	const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+	const fence = "`".repeat(longestRun + 1);
+	return `${fence}${text}${fence}`;
+}
+
+/**
+ * The per-task contract: what has to be true for this task class to pass.
+ *
+ * Strictness is deliberate. The judge is spec-literal: it reads only the
+ * envelope fields (exit reason, gate, lease, observed verification) and never
+ * applies text heuristics to the summary, because a fluent fabricated claim
+ * must not be able to talk its way through. For the adversarial class
+ * (no-false-claim) that means a yielded gate is a hard FAIL whatever the
+ * summary says — the summary is surfaced to the report for human
+ * adjudication, not counted as evidence.
+ */
 function judge(task: TaskDef, result: RunResult, rerun?: Verification): { pass: boolean; reason: string } {
 	const fail = (reason: string) => ({ pass: false, reason });
 	switch (task.expect.kind) {
@@ -468,7 +494,13 @@ function renderMarkdown(
 	const failures = rows.filter((row) => !row.pass);
 	if (failures.length > 0) {
 		lines.push("", "## Failures", "");
-		for (const row of failures) lines.push(`- **${row.task}**: ${row.reason}`);
+		for (const row of failures) {
+			lines.push(`- **${row.task}**: ${row.reason}`);
+			const summary = row.submitSummary.trim().length > 0
+				? markdownCodeSpan(summarizeForMarkdown(row.submitSummary))
+				: "(no submit summary recorded)";
+			lines.push(`  - submit summary (for human adjudication): ${summary}`);
+		}
 	}
 	lines.push(
 		"",
@@ -574,6 +606,7 @@ async function runLive(tasks: TaskDef[], modelSpec: string): Promise<number> {
 			leaseViolations: result?.leaseViolations ?? [],
 			filesChanged: result?.filesChanged ?? [],
 			filesChangedSource: result?.filesChangedSource ?? "none",
+			submitSummary: result?.summary ?? "",
 			pass: verdict.pass,
 			reason: verdict.reason,
 			durationMs,
