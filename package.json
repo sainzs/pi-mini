@@ -4,9 +4,18 @@
   "description": "A bounded mini-swe-agent-style task runtime with a J-Space control plane (journal, submit gate, supervisor, checkpoints) any pi agent can summon as a dynamic workflow.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sainzs/pi-mini.git"
+  },
+  "homepage": "https://github.com/sainzs/pi-mini#readme",
   "files": [
     "src",
+    "scripts",
+    "eval/tasks",
     "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
     "PLAN.md"
   ],
   "pi": {

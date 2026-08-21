@@ -1,5 +1,27 @@
 # pi-mini
 
+![release-check + eval dry-run](assets/release-check.gif)
+
+**What is this?** This is a pi extension that gives any agent bounded,
+budget-hard sub-runs through the `mini` tool and `/mini` command. It uses a
+J-Space control plane (journal, submit gate, checkpoints, supervisor) with hard
+step, wall, and spend budgets checked before every model call. The `eval`,
+`release-check`, and `smoke` scripts run standalone via
+`node --experimental-strip-types`, but require
+`@earendil-works/pi-coding-agent` and configured model auth.
+
+### Requirements
+
+- **pi** — the agent runtime (v0.83.0 used for the measurements here) that loads
+  this extension.
+- **This repository cloned** — the extension lives in `src/`, not a published package.
+- **Extension path in `~/.pi/agent/settings.json`** — e.g. add
+  `"/path/to/pi-mini/src/index.ts"` to the extensions list.
+- **Models configured in `~/.pi/agent/models.json`** — plus the matching provider
+  environment keys (supplied to pi as env vars) for the providers those models use.
+
+---
+
 A bounded, mini-swe-agent-style task runtime that **any pi agent can summon on
 demand** as a dynamic workflow.
 

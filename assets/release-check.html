@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;padding:0;background:#000000}
+body{font-family:"Berkeley Mono Variable", "Berkeley Mono", ui-monospace, Menlo, monospace;color:#eeeeee;padding:48px 56px;-webkit-font-smoothing:antialiased}
+.wordmark{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+.wordmark .name{font-size:28px;font-weight:700;letter-spacing:-.5px}
+.wordmark .tag{color:#00ffb2;font-size:13px;font-weight:600}
+.sub{color:#8a8a93;font-size:14px;margin-bottom:28px;line-height:1.5}
+.sub b{color:#eeeeee;font-weight:600}
+.term{background:#070707;border:1px solid #16181a;border-radius:12px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.6);width:880px}
+.term-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;background:#101013;border-bottom:1px solid #16181a}
+.dot{width:11px;height:11px;border-radius:50%}.dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+.term-title{margin-left:10px;color:#55555e;font-size:12px}
+.term-body{padding:20px 22px 24px;font-size:13.5px;line-height:1.55;min-height:360px}
+.p{color:#00ffb2;font-weight:700}.cmd{color:#eeeeee}.out{color:#8a8a93;white-space:pre-wrap}.ok{color:#00ffb2}.hl{color:#eeeeee}
+.line{display:block}.cursor{display:inline-block;width:8px;height:16px;background:#00ffb2;vertical-align:-2px}
+.cursor.blink{animation:blink 1.1s steps(1) infinite}@keyframes blink{50%{opacity:0}}.gap{height:14px}
+</style></head><body>
+<div class="wordmark"><span class="name">pi-mini</span><span class="tag">v0.4.0</span></div>
+<div class="sub">bounded sub-runs for pi · J-Space control plane<br />budgets · journal · submit gate · checkpoints</div>
+<div class="term"><div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">~/Code/pi-mini</span></div>
+<div class="term-body" id="body"></div></div>
+<script>
+const body=document.getElementById("body");
+const SCRIPT=[{"type":"cmd","text":"npm run release-check -- --live"},{"type":"stream","lines":["step 1: npx tsc --noEmit — PASS","step 2: 100/100 tests — PASS","step 3: live smoke claude-fable-5 — PASS (49.0s)","step 5: live smoke DeepSeek-V4-Flash-0731 — PASS (13.7s)"]},{"type":"out","cls":"ok","text":"release check passed: findings/release-2026-08-20-1615/summary.md"},{"type":"gap"},{"type":"cmd","text":"npm run eval -- --dry-run"},{"type":"out","cls":"ok","text":"dry-run: 8/8 tasks valid"},{"type":"done"}];
+const TYPE_MS=34,LINE_MS=90,AFTER_CMD=260,END_HOLD=1600;
+let cursor=null;
+const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
+const escH=(s)=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
+function newCursor(b){const c=document.createElement("span");c.className="cursor"+(b?" blink":"");return c;}
+async function typeCommand(text){const line=document.createElement("div");line.innerHTML='<span class="p">$</span> <span class="cmd"></span>';const cs=line.querySelector(".cmd");body.appendChild(line);cursor=newCursor(false);line.appendChild(cursor);for(const ch of String(text)){cs.textContent+=ch;line.appendChild(cursor);await wait(TYPE_MS);}await wait(AFTER_CMD);cursor.remove();}
+async function showOut(t2,cls){const line=document.createElement("div");line.innerHTML='<span class="out '+(cls||"")+'">'+escH(t2)+"</span>";body.appendChild(line);}
+async function streamLines(lines){const box=document.createElement("div");box.className="out";body.appendChild(box);for(const ln of lines){const s=document.createElement("span");s.className="line";s.textContent=ln;box.appendChild(s);await wait(LINE_MS);}}
+function addGap(){const g=document.createElement("div");g.className="gap";body.appendChild(g);}
+async function run(){for(const st of SCRIPT){if(st.type==="cmd")await typeCommand(st.text);else if(st.type==="out")await showOut(st.text,st.cls);else if(st.type==="stream")await streamLines(st.lines);else if(st.type==="gap")addGap();else if(st.type==="done"){const p=document.createElement("div");p.innerHTML='<span class="p">▊</span>';cursor=newCursor(true);p.appendChild(cursor);body.appendChild(p);}}await wait(END_HOLD);window.__done=true;}
+run();
+</script></body></html>
