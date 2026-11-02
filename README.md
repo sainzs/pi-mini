@@ -1,5 +1,10 @@
 # pi-mini
 
+> **Moved:** pi-mini is now maintained in
+> [`sainzs/bit-machine`](https://github.com/sainzs/bit-machine/tree/main/packages/pi-mini-agent)
+> under `packages/pi-mini-agent`, with this repository's history merged in.
+> This repository is archived and frozen at v0.4.0.
+
 ![release-check + eval dry-run](assets/release-check.gif)
 
 **What is this?** This is a pi extension that gives any agent bounded,
